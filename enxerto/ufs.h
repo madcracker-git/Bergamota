@@ -42,6 +42,8 @@ void test_ufs(void);
 /* Take over the transfer request list (idempotent). 0 or UFS_E_*. */
 int ufs_init(void);
 const char *ufs_errstr(int rc);
+/* Persistent bring-up stage marker (IMEM, survives warm reset); 0 on non-SM6375. */
+uint32_t ufs_diag_word(void);
 /* Commands in flight during a transfer: 1..8 (default 8). `oem ufsq:<n>`: 1 = no pipelining, for debugging on hardware. */
 int ufs_set_depth(int n);
 /* Called while waiting (screen refresh, USB keep-alive); may be NULL. */

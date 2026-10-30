@@ -107,7 +107,7 @@ static void fb_drop_session(struct fb *fb)
  * relocations, and the shim image runs wherever ABL put it (build.sh rejects ABS64).
  */
 #ifdef FB_INITRD_DIAG
-#define FB_NVARS 18
+#define FB_NVARS 19
 #else
 #define FB_NVARS 15
 #endif
@@ -194,6 +194,15 @@ static const char *fb_var(struct fb *fb, unsigned i, const char **name, char *bu
 		p += fb_hex(p, ufs_last.cfg1, 2);
 		*p++ = ' '; *p++ = 't'; *p++ = '=';
 		p += fb_hex(p, ufs_last.target, 2);
+		*p = 0;
+		return buf;
+	}
+	case 18: {
+		/* bootloader-only: persistent IMEM bring-up stage marker (survives reboot) */
+		*name = "bergamota-imem";
+		char *p = buf;
+		*p++ = 's'; *p++ = '=';
+		p += fb_hex(p, ufs_diag_word(), 2);
 		*p = 0;
 		return buf;
 	}

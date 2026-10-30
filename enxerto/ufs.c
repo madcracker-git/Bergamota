@@ -521,6 +521,27 @@ static int query_req(unsigned lun, uint8_t opcode, uint8_t idn, uint32_t value, 
 }
 
 #ifdef BOARD_SM6375
+/* Persistent bring-up stage marker in IMEM (survives warm reset so a crash can
+ * be diagnosed after the reboot). IMEM restart_reason is at 0xc12565c; this
+ * scratch sits a few words above it. */
+#define UFS_IMEM_DIAG	0xc125700UL
+static void ufs_mark(uint32_t s)
+{
+	*(volatile uint32_t *)UFS_IMEM_DIAG = s;
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+uint32_t ufs_diag_word(void)
+{
+	return *(volatile uint32_t *)UFS_IMEM_DIAG;
+}
+#else
+uint32_t ufs_diag_word(void)
+{
+	return 0;
+}
+#endif
+
+#ifdef BOARD_SM6375
 /*
  * QMP UFS PHY calibration (vendor phy_cal_table_rate_A_no_g4, SM6375 non-G4,
  * 1 lane): (offset-from-PHY-base, value) pairs, written while SW_RESET is held.
@@ -596,11 +617,14 @@ static int ufs_phy_init(void)
 	volatile uint32_t *phy = (volatile uint32_t *)UFS_PHY_BASE;
 	unsigned bad = 0;
 
+	ufs_mark(0x110);			/* ufs_phy_init entered */
+
 	/* 1. power the PHY domain first (ufs_phy_gdsc): clear SW_COLLAPSE, wait PWR_ON */
 	uint32_t g = gcc_rd(GCC_UFS_PHY_GDSCR);
 	gcc_wr(GCC_UFS_PHY_GDSCR, g & ~1u);
 	for (int i = 0; i < 2000 && !(gcc_rd(GCC_UFS_PHY_GDSCR) & (1u << 31)); i++)
 		udelay(5);
+	ufs_mark(0x111);			/* GDSC powered */
 
 	/* 2. RCG sources at known-good frequencies (DT freq-table):
 	 *    axi 100 MHz = GPLL0_OUT_ODD(200MHz, src 4) / 2
@@ -608,40 +632,58 @@ static int ufs_phy_init(void)
 	 *    ice 150 MHz = GPLL0_OUT_EVEN(src 2) / 2
 	 *    aux 19.2 MHz = BI_TCXO(src 0) / 1 */
 	bad |= !ufs_rcg_set(GCC_UFS_PHY_AXI_SRC, 4, 3) << 0;
+	ufs_mark(0x112);			/* axi rcg done */
 	bad |= !ufs_rcg_set(GCC_UFS_PHY_UNIPRO_SRC, 2, 7) << 1;
+	ufs_mark(0x113);			/* unipro rcg done */
 	bad |= !ufs_rcg_set(GCC_UFS_PHY_ICE_SRC, 2, 3) << 2;
+	ufs_mark(0x114);			/* ice rcg done */
 	bad |= !ufs_rcg_set(GCC_UFS_PHY_AUX_SRC, 0, 1) << 3;
+	ufs_mark(0x115);			/* aux rcg done */
 
 	/* 3. branch clocks on (the PHY block and host controller need all of them) */
 	bad |= !ufs_clk_on(GCC_UFS_PHY_AHB_CLK) << 4;	/* iface_clk */
+	ufs_mark(0x116);
 	bad |= !ufs_clk_on(GCC_UFS_PHY_AXI_CLK) << 5;	/* core_clk */
+	ufs_mark(0x117);
 	bad |= !ufs_clk_on(GCC_UFS_PHY_UNIPRO_CLK) << 6;
+	ufs_mark(0x118);
 	bad |= !ufs_clk_on(GCC_UFS_PHY_ICE_CLK) << 7;
+	ufs_mark(0x119);
 	bad |= !ufs_clk_on(GCC_UFS_PHY_AUX_CLK) << 8;
+	ufs_mark(0x11a);
 	bad |= !ufs_clk_on(GCC_UFS_PHY_TX_SYM) << 9;
+	ufs_mark(0x11b);
 	bad |= !ufs_clk_on(GCC_UFS_PHY_RX_SYM) << 10;
+	ufs_mark(0x11c);
 	bad |= !ufs_clk_on(GCC_SYS_NOC_UFS_AXI) << 11;
+	ufs_mark(0x11d);
 	bad |= !ufs_clk_on(GCC_UFS_MEM_CLKREF) << 12;
+	ufs_mark(0x11e);			/* branch clocks done */
 
 	/* 4. PHY reset (BCR) assert, hold SW_RESET, write cal, release both */
 	gcc_wr(GCC_UFS_PHY_BCR, gcc_rd(GCC_UFS_PHY_BCR) | 1u);	/* reset assert */
 	udelay(200);
 	phy[UFS_PHY_SW_RESET / 4] = 0x01;	/* PHY software reset */
 	__asm__ volatile("dmb sy" ::: "memory");
+	ufs_mark(0x11f);			/* SW_RESET held */
 	/* power_control(power on): clear RX interface CLOCK_EDGE (bit 5) before the table */
 	phy[QSERDES_RX0_IFACE_MODE / 4] &= ~(1u << 5);
 	for (unsigned k = 0; k < sizeof ufs_phy_cal / sizeof ufs_phy_cal[0]; k++)
 		phy[ufs_phy_cal[k][0] / 4] = ufs_phy_cal[k][1];
+	ufs_mark(0x120);			/* cal table written */
 	phy[UFS_PHY_SW_RESET / 4] = 0x00;	/* release software reset */
 	__asm__ volatile("dmb sy" ::: "memory");
 	gcc_wr(GCC_UFS_PHY_BCR, gcc_rd(GCC_UFS_PHY_BCR) & ~1u);	/* reset deassert */
 	udelay(200);
+	ufs_mark(0x121);			/* reset released */
 
 	/* 5. start the SERDES and wait for the PCS (physical coding sublayer) */
 	phy[UFS_PHY_START / 4] = 0x01;
 	__asm__ volatile("dmb sy" ::: "memory");
+	ufs_mark(0x122);			/* serdes started, polling PCS */
 	for (int i = 0; i < 2000 && !(phy[UFS_PHY_PCS_READY / 4] & 1); i++)
 		udelay(500);			/* up to ~1 s */
+	ufs_mark(0x123);			/* PCS poll done */
 
 	/* record diagnostics: hcs = raw HCS, is = PCS_READY, cfg1 = clock failure
 	 * bitmap, target = ufs_phy_gdsc register (bit31 PWR_ON, bit0 SW_COLLAPSE). */
@@ -657,6 +699,7 @@ static int ufs_phy_init(void)
 /* Re-run the host-controller enable (Linux ufshcd_hba_execute_hce). */
 static int ufs_hce_execute(void)
 {
+	ufs_mark(0x130);			/* HCE execute */
 	ufs_wr(REG_HCE, 0);
 	for (int i = 0; i < 1000 && (ufs_rd(REG_HCE) & 1); i++)
 		udelay(10);
@@ -677,6 +720,7 @@ static int ufs_hce_execute(void)
 /* UniPro link startup (Linux ufshcd_dme_link_startup). */
 static int ufs_dme_link_startup(void)
 {
+	ufs_mark(0x140);			/* DME link startup */
 	if (!(ufs_rd(REG_HCS) & HCS_UICRDY))
 		return UFS_E_NOTREADY;
 	ufs_wr(REG_IE, ufs_rd(REG_IE) | IS_UIC_CMD_COMPL);
@@ -692,6 +736,7 @@ static int ufs_dme_link_startup(void)
 		if (idle_fn)
 			idle_fn();
 	}
+	ufs_mark(0x141);			/* DME link startup done */
 	uint32_t result = ufs_rd(REG_UIC_ARG2) & 0xff;
 	ufs_last.target = result;		/* UIC command result (0 = success) */
 	return result == 0 ? 0 : UFS_E_RESP;
@@ -713,6 +758,7 @@ int ufs_init(void)
 	 * bare-metal taker (HCS shows HOST_ERROR_INDICATOR, HCE clear). Re-run the
 	 * Qualcomm sequence: PHY init -> HCE -> DME link startup -> lists -> UTRLRDY.
 	 */
+	ufs_mark(0x100);			/* ufs_init entered (SM6375) */
 	ufs_last.stage = 0;			/* QMP PHY init */
 	rc = ufs_phy_init();
 	if (rc)
