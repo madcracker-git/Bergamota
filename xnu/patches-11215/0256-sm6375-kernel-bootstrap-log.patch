@@ -1,0 +1,76 @@
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index d3b27ac..04bc127 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -233,4 +233,16 @@ sweet_early_disable(void)
+ 	early_disabled = 1;
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
++
++/* One plain text line to the early console, for tracing kernel_bootstrap
++ * when kprintf output is not yet visible. No-op unless sweetearlyfb=1. */
++void
++sweet_early_log(const char *s)
++{
++	if (early_disabled || !early_screen) {
++		return;
++	}
++	sweet_early_string(s);
++	sweet_early_putc('\n');
++}
+ #endif /* SWEET */
+diff --git a/osfmk/arm64/sweet_early.h b/osfmk/arm64/sweet_early.h
+index 3e46c4a..e22ce1b 100644
+--- a/osfmk/arm64/sweet_early.h
++++ b/osfmk/arm64/sweet_early.h
+@@ -13,6 +13,7 @@ void sweet_early_panic(const char *fmt, va_list *args);
+ void sweet_early_relocate(uint64_t base);
+ void sweet_early_set_video(uint64_t pa, uint64_t width, uint64_t height, uint64_t rowbytes);
+ uint64_t sweet_early_block_pa(void);
++void sweet_early_log(const char *s);
+ void sweet_early_disable(void);
+ void sweet_early_set_cmdline(const char *cmdline);
+ void sweet_early_flush_log(void);
+@@ -26,6 +27,7 @@ static inline void sweet_early_disable(void) {}
+ static inline void sweet_early_set_cmdline(const char *cmdline) { (void)cmdline; }
+ static inline void sweet_early_flush_log(void) {}
+ static inline uint64_t sweet_early_block_pa(void) { return 0; }
++static inline void sweet_early_log(const char *s) { (void)s; }
+ static inline void sweet_early_set_video(uint64_t pa, uint64_t width, uint64_t height, uint64_t rowbytes)
+ {
+ 	(void)pa;
+diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
+index 3532d15..bb09be2 100644
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -148,6 +148,10 @@ extern void mbuf_tag_init(void);
+ #include <arm64/alternate_debugger.h>
+ #endif
+ 
++#if defined(SWEET)
++#include <arm64/sweet_early.h>
++#endif
++
+ #if MACH_KDP
+ #include <kdp/kdp.h>
+ #endif
+@@ -226,6 +230,9 @@ kernel_bootstrap_log(const char *message)
+ 	    startup_phase >= STARTUP_SUB_KPRINTF) {
+ 		kprintf("kernel_bootstrap: %s\n", message);
+ 	}
++#if defined(SWEET)
++	sweet_early_log(message);
++#endif
+ 	kernel_debug_string_early(message);
+ }
+ 
+@@ -236,6 +243,9 @@ kernel_bootstrap_thread_log(const char *message)
+ 	    startup_phase >= STARTUP_SUB_KPRINTF) {
+ 		kprintf("kernel_bootstrap_thread: %s\n", message);
+ 	}
++#if defined(SWEET)
++	sweet_early_log(message);
++#endif
+ 	kernel_debug_string_early(message);
+ }
+ 
