@@ -252,27 +252,58 @@ beryllium/sweet/qemu builds unchanged (regression-checked). The Apple
 `d22ap.adt` /product node is still git-ignored (needs the iPhone X IPSW).
 
 **Kernel build requires GitHub Actions** (`xnu.yml` on macOS runners) — no
-local Linux/Windows kernel build. That needs `gh` CLI + the repo pushed to the
-user's own fork. The generic `sweet-*` series is the first thing to boot; SM6375
-will additionally need `sm6375-*` patches for display (SDE/`qcom,sde-kms`),
-UFS, PM6125/PMK8350 PMIC, etc. — the `beryllium-*` patches are SDM845-specific.
+local Windows build. `gh` + fork set up (2026-10-30): fork
+`madcracker-git/Bergamota`, branch `sm6375-port` pushed, first baseline CI
+build dispatched (run 40987011382, the full default patch set).
 
-1. Build the generic series as-is first: `gh workflow run xnu.yml …` with the
-   `sweet-*` patches only, `MACHINE_CONFIG=SWEET`, and see how far the
-   early-framebuffer-debug chain (`0003`–`0012`) gets.
-2. Add a `sm6375` board entry to `tools/mkadt.py`. **This requires a small
-   refactor**: GIC (`GICD`/`GICR`), UFS (`UFS`), and the timer (`TIMEBASE`)
-   are currently module-level constants shared by `sweet` and `beryllium`; move
-   them into the `BOARDS` dict so SM6375 can supply its own. Add the SM6375
-   CPU topology (`cpu_compat='qcom,kryo660'`, `big_from=2`, 2× A78 + 6× A55)
-   and the new `compat`/`mem`/`fb` values.
-3. Add `sm6375-*` kernel patches for anything that differs from the shared
-   GIC/timer/UFS assumptions in the `sweet-*` series (timer INTID, GIC Group-1
-   routing, UFS host regs).
-4. Port the display scanout from **MDP → DPU**. This is the biggest single
-   kernel task: the `beryllium-*` MDP page-flip/scanout patches do not apply,
-   and SM6375's DPU has a different command set. `docs/DISPLAY_HW.md` is the
-   reference for the MDP path to reimplement.
+### M2a — Patch-set curation (the SM6375 kernel patch list)
+
+The 219 files in `xnu/patches-11215/` split by name prefix: **121 `sweet-*`,
+89 `beryllium-*`, 6 `ios18-*`, 5 `topaz-*`**, plus 3 `.sh` stage scripts.
+The SM6375 kernel = the SoC-agnostic subset + new `sm6375-*` drivers. This is
+the concrete carry/drop/replace list:
+
+**Carry over unchanged (SoC-agnostic XNU port):**
+- `0003`–`0071` `sweet-*` bring-up: framebuffer serial console, machine config,
+  physmap padding, kmem RNG, device-tree platform expert, virtual-timer IRQ,
+  boot CPU, libpthread/bearssl/hfs staging, mockfs ramdisk, AMFI, HFS, root/UFS
+  bootstrap (see below), SMP/PSCI.
+- `0102` `sweet-review-fixes`, `0131`–`0160` (`ios18-*` + `sweet-*`) iOS 18
+  port: arm64e exec, dyld pager, IOSurface limits/layout, IOMFB swap record.
+- `0141` FJCVTZS emulation, `0170`–`0173` xnu-11215 API fixes, `0195` early
+  console, `0222` UFS durability syncer.
+- The 3 `.sh` stage scripts (libpthread, bearssl, hfs).
+
+**Already portable (ADT-driven, no code change):**
+- `0028`/`0030` UFS root + writes: `sweet_ufs.c` locates its registers via
+  `SecureDTLookupEntry("/sweet-ufs")` → the ADT `reg` I made per-board, so it
+  reads `0x04804000` automatically. UFS 2.1 vs 3.1 register differences still
+  need a boot test.
+
+**Drop (SDM845/beryllium-specific) — write `sm6375-*` equivalents:**
+- Display/scanout: `0096`, `0126`, `0128`–`0129`, `0210`–`0213`, `0215`–`0216`,
+  `0220`–`0221`, `0224`, `0227`–`0249` (MDP → **SDE**; `qcom,sde-kms`).
+- Touch/keys: `0060`, `0062`–`0063`, `0082`, `0085`–`0086`, `0101`, `0111`–
+  `0114`, `0161` (NT36672C on SPI).
+- USB kernel driver: `0072`–`0077`, `0081`, `0084`, `0087`, `0089`, `0094`,
+  `0098`, `0107` — `sweet_usb.c` **hardcodes** `DWC3 0x0a600000`, `QUSB2
+  0x088e2000`, `GCC 0x00100000` (SDM845); needs the SM6375 values from
+  `enxerto/usb_dwc3.c`/`usb_power.c` (already ported).
+- PMIC/charger/battery: `0092`, `0095`, `0130`, `0200`–`0201`, `0219`,
+  `0223`, `0225`–`0226`, `0242`–`0249` (PMI8998/PM8998 → **PM6125/PMK8350**).
+- WLAN/BT: `0104`, `0117`–`0136`, `0239` (WCN3990 — same chip, so these port
+  nearly as-is; slim@a5c0000 vs beryllium's bus).
+- GPU A630: `0103`, `0180`–`0189`, `0214`, `0232`, `0234`, `0236`–`0237`,
+  `0251` (→ Adreno 619).
+- Reboot/IMEM: `0137`, `0140` (IMEM base `0xc12565c` already in `board.h`).
+
+**Note:** the `beryllium-*` count (89) is the *lower bound* on rewrite work;
+several `sweet-*` drivers bake in SDM845 addresses (USB is the big one).
+
+1. First boot: the generic series + the ADT, `sweet-*` only, see how far the
+   early-framebuffer-debug chain (`0003`–`0012`) gets on the Nord.
+2. Then add `sm6375-*` patches one driver at a time (UFS first — already
+   ADT-driven — then display, then USB, then the rest).
 
 **Exit:** the kernel prints its boot log to the panel/serial and reaches
 `launchd` (or at least a stable console with a panic we can iterate on).
