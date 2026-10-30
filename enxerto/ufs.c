@@ -396,17 +396,21 @@ int ufs_init(void)
 
 	static const uint8_t tur[6] = { 0x00 };
 	int rc = 0;
+	int fdi = 0;
 	/* UFS 3.1 (SM6375): the device reports "not ready, initializing command
-	 * required" (sense 02/04 02) until the host completes device init, exactly
-	 * like Linux's ufshcd_complete_dev_init(): SET_FLAG fDeviceInit, then poll
-	 * READ_FLAG until the device clears it (it then re-initialises and the LUN
-	 * comes ready). UFS 2.1 (SDM845) came up ready from ABL, where these return
-	 * success immediately. */
-	rc = query_flag(0, 1, QRY_IDN_FDEVICEINIT, 0);	/* SET_FLAG fDeviceInit */
-	if (rc && rc != UFS_E_RESP)
-		return rc;			/* OCS/timeout: a real transport failure */
-	int fdi = 1;
-	for (int i = 0; i < 100 && rc == 0; i++) {	/* poll READ_FLAG until cleared */
+	 * required" (sense 02/04 02) because its fDeviceInit flag is already set
+	 * (it is re-initialising after ABL). SET_FLAG is then redundant and the
+	 * device answers GENERAL_FAILURE, so READ the flag first: if it is already
+	 * 1, just poll READ_FLAG until the device clears it (init done), then
+	 * TEST UNIT READY. Only SET_FLAG when it reads 0 (Linux's complete_dev_init
+	 * path). */
+	rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);	/* READ_FLAG first */
+	if (rc == 0 && fdi == 0) {
+		rc = query_flag(0, 1, QRY_IDN_FDEVICEINIT, 0);	/* SET_FLAG */
+		if (rc)
+			rc = 0;			/* already-initialising is not fatal: fall through to poll */
+	}
+	for (int i = 0; i < 200 && rc == 0; i++) {	/* poll READ_FLAG until cleared */
 		rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);
 		if (rc || !fdi)
 			break;
