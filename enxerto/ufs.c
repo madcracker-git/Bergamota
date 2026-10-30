@@ -38,6 +38,17 @@
 
 #define CAP_64AS	(1u << 24)
 
+/* UFS query UPIU (JEDEC JESD220): the dev-management request Linux uses to
+ * complete device init (ufshcd_complete_dev_init). */
+#define UPIU_TC_QUERY_REQ	0x16
+#define UPIU_TC_QUERY_RSP	0x36
+#define UPIU_QF_STD_READ	0x01
+#define UPIU_QF_STD_WRITE	0x81
+#define UPIU_QOP_READ_FLAG	0x05
+#define UPIU_QOP_SET_FLAG	0x06
+#define QRY_IDN_FDEVICEINIT	0x01
+#define QRY_RESP_SUCCESS	0x00
+
 #define NQ		8			/* commands in flight */
 #define CMD_BLKS	64u			/* 256 KiB per command = one PRDT entry */
 #define CMD_BYTES	(CMD_BLKS * UFS_BLK)
@@ -278,6 +289,73 @@ static int scsi_sync(unsigned lun, const uint8_t *cdb, unsigned cdb_len, void *b
 	return rc;
 }
 
+/* UFS query request (dev management). set=1: SET_FLAG, set=0: READ_FLAG; *flag
+ * receives the flag value on READ_FLAG. Uses slot 0 (doorbell bit 0). */
+static int query_flag(unsigned lun, int set, uint8_t idn, int *flag)
+{
+	struct utrd *d = &utrl[0];
+	struct ucd *c = &ucd[0];
+	uintptr_t ucd_pa = (uintptr_t)c;
+	uint32_t ocs;
+	int rc;
+
+	if (x_active())
+		return UFS_E_ARGS;
+
+	/* QUERY_REQ UPIU: 12-byte header + 20-byte query OSF, zeroed then filled */
+	for (int k = 0; k < 32; k++)
+		c->cmd[k] = 0;
+	c->cmd[0] = UPIU_TC_QUERY_REQ;
+	c->cmd[2] = (uint8_t)lun;
+	c->cmd[5] = set ? UPIU_QF_STD_WRITE : UPIU_QF_STD_READ;
+	c->cmd[12] = set ? UPIU_QOP_SET_FLAG : UPIU_QOP_READ_FLAG;
+	c->cmd[13] = idn;
+	/* index, selector, length, value stay 0 */
+
+	/* response UPIU cleared so a stale response is never mistaken */
+	for (int k = 0; k < 64; k += 4)
+		w32(&c->resp[k], 0);
+
+	/* UTRD: no data transfer (DD=0), interrupt, CT = UFS storage */
+	w32(&d->dw0, (1u << 28) | (1u << 24));
+	w32(&d->dw1, 0);
+	w32(&d->dw2, 0x0f);
+	w32(&d->dw3, 0);
+	w32(&d->ucdba, (uint32_t)ucd_pa);
+	w32(&d->ucdbau, (uint32_t)(ucd_pa >> 32));
+	w32(&d->resp, (512u / 4) << 16 | (512u / 4));
+	w32(&d->prdt, 0);
+
+	/* ring the doorbell (slot 0 = bit 0) and wait for the host to clear it */
+	dc_clean(d, sizeof *d);
+	dc_clean(c->cmd, 32);
+	dc_clean(c->resp, 64);
+	ufs_wr(REG_UTRLDBR, 1u);
+	uint64_t t = ticks();
+	while (ufs_rd(REG_UTRLDBR) & 1u) {
+		if (ticks() - t > CMD_TIMEOUT) {
+			slot_abort(0);
+			return ufs_last.rc = UFS_E_TIMEOUT;
+		}
+		if (idle_fn)
+			idle_fn();
+	}
+	dc_inval(d, sizeof *d);
+	dc_inval(c->resp, 64);
+	ocs = r32(&d->dw2) & 0xff;
+	ufs_last.ocs = ocs;
+	ufs_last.upiu = ((const volatile uint8_t *)c->resp)[0];
+	ufs_last.target = ((const volatile uint8_t *)c->resp)[6];	/* query result code */
+	ufs_last.status = ((const volatile uint8_t *)c->resp)[7];
+	if (ocs)
+		return ufs_last.rc = UFS_E_OCS;
+	if (ufs_last.upiu != UPIU_TC_QUERY_RSP || ufs_last.target != QRY_RESP_SUCCESS)
+		return ufs_last.rc = UFS_E_RESP;
+	if (flag)
+		*flag = ((const volatile uint8_t *)c->resp)[20];	/* value field low byte */
+	return ufs_last.rc = 0;
+}
+
 int ufs_init(void)
 {
 	uint32_t hcs, hce;
@@ -318,11 +396,25 @@ int ufs_init(void)
 
 	static const uint8_t tur[6] = { 0x00 };
 	int rc = 0;
-	/* UFS 3.1 (SM6375) boots the LUN in "not ready, initializing" (sense
-	 * 02/04 02). There is no explicit start command to send: the media comes
-	 * ready on its own, so poll TEST UNIT READY with a real delay, accepting
-	 * sense key 2 (NOT READY) as "still initializing, keep waiting". */
-	for (int i = 0; i < 100; i++) {
+	/* UFS 3.1 (SM6375): the device reports "not ready, initializing command
+	 * required" (sense 02/04 02) until the host completes device init, exactly
+	 * like Linux's ufshcd_complete_dev_init(): SET_FLAG fDeviceInit, then poll
+	 * READ_FLAG until the device clears it (it then re-initialises and the LUN
+	 * comes ready). UFS 2.1 (SDM845) came up ready from ABL, where these return
+	 * success immediately. */
+	rc = query_flag(0, 1, QRY_IDN_FDEVICEINIT, 0);	/* SET_FLAG fDeviceInit */
+	if (rc && rc != UFS_E_RESP)
+		return rc;			/* OCS/timeout: a real transport failure */
+	int fdi = 1;
+	for (int i = 0; i < 100 && rc == 0; i++) {	/* poll READ_FLAG until cleared */
+		rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);
+		if (rc || !fdi)
+			break;
+		for (int d = 0; d < 100; d++)	/* ~100 ms */
+			udelay(1000);
+	}
+	/* then TEST UNIT READY until the LUN is ready */
+	for (int i = 0; i < 100 && !rc; i++) {
 		rc = scsi_sync(0, tur, sizeof tur, 0, 0, 0);
 		if (!rc)
 			break;
