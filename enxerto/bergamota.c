@@ -813,7 +813,14 @@ const char *bergamota_fastboot(uintptr_t dtb)
 	if (why)
 		return why;
 	const char *smmu_opt = cmdline_opt(dtb, "bergamota.smmu=");
+#ifdef BOARD_SM6375
+	/* qsmmu-v500 (apps-smmu@0c600000) is a different MMU than the SDM845 arm-smmu-v2
+	 * the smmu_map() code programs; the ABL leaves the USB stream configured (DT
+	 * qcom,skip-init). Opt in with bergamota.smmu=1 once qsmmu-v500 is ported. */
+	int use_smmu = (smmu_opt && *smmu_opt == '1');
+#else
 	int use_smmu = !(smmu_opt && *smmu_opt == '0');
+#endif
 
 	ui_start_ms = ms_now();
 	con_str("USB", "starting controller...");

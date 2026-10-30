@@ -10,6 +10,28 @@
 #include "console.h"
 #include "usb_power.h"
 
+#ifdef BOARD_SM6375
+/* SM6375 "blair": gcc-sm6375.c + live DT (GCC at 0x1400000). */
+#define GCC		0x1400000UL
+#define USB30_PRIM_BCR	0x1a000
+#define USB30_GDSCR	0x1a004
+#define MASTER_CBCR	0x1a010
+#define SLEEP_CBCR	0x1a014
+#define MOCK_UTMI_CBCR	0x1a018
+#define MASTER_RCG	0x1a01c	/* CMD; CFG at +4 */
+#define MOCK_UTMI_RCG	0x1a034
+#define PHY_AUX_CBCR	0x1a054
+#define PHY_AUX_RCG	0x1a060
+#define CFG_NOC_CBCR	0x1a084
+#define AGGRE_CBCR	0x1a080
+#define AHB2PHY_BCR	0x1d000
+#define AHB2PHY_CBCR	0x1d008
+#define CLKREF_EN	0x8c010
+#define QUSB2PHY_BCR	0x1c000
+
+#define HSPHY		0x162b000UL	/* hsphy@162b000 (snps-femto-v2) */
+#define DWC3_GSNPSID	0x04e0c120UL
+#else
 #define GCC		0x00100000UL
 #define USB30_PRIM_BCR	0x0f000
 #define USB30_GDSCR	0x0f004
@@ -27,8 +49,9 @@
 #define CLKREF_EN	0x8c008
 #define QUSB2PHY_BCR	0x12000
 
-#define QUSB2		0x088e2000UL
+#define HSPHY		0x088e2000UL	/* qusb2 */
 #define DWC3_GSNPSID	0x0a60c120UL
+#endif
 
 static inline uint32_t rd(uintptr_t a)
 {
@@ -98,12 +121,43 @@ static int alive(void)
 	       !(rd(GCC + CFG_NOC_CBCR) & (1u << 31));
 }
 
+#ifndef BOARD_SM6375
 /* qcom,qusb-phy-init-seq of live.dts, as (value, offset) pairs */
 static const uint16_t phy_seq[][2] = {
 	{ 0x23, 0x210 }, { 0x03, 0x04 }, { 0x7c, 0x18c }, { 0x80, 0x2c }, { 0x0a, 0x184 }, { 0x19, 0xb4 },
 	{ 0x40, 0x194 }, { 0x18, 0x198 }, { 0x21, 0x214 }, { 0x08, 0x220 }, { 0x58, 0x224 }, { 0x07, 0x240 },
 	{ 0x29, 0x244 }, { 0xca, 0x248 }, { 0x04, 0x24c }, { 0x03, 0x250 }, { 0x00, 0x23c }, { 0x22, 0x210 },
 };
+#endif
+
+#ifdef BOARD_SM6375
+/* snps-femto-v2 HS PHY bring-up (phy-qcom-snps-femto-v2.c qcom_snps_hsphy_init). */
+static void snps_femto_init(void)
+{
+	wr(GCC + QUSB2PHY_BCR, 1);	/* phy reset assert */
+	udelay(150);
+	wr(GCC + QUSB2PHY_BCR, 0);	/* deassert */
+	udelay(150);
+	uintptr_t h = HSPHY;
+	uint32_t v;
+	v = rd(h + 0x94); wr(h + 0x94, v | (1u << 1));		/* CFG0: UTMI_PHY_CMN_CTRL_OVERRIDE_EN */
+	v = rd(h + 0x50); wr(h + 0x50, v | (1u << 1));		/* UTMI_CTRL5: POR */
+	v = rd(h + 0x54); wr(h + 0x54, v & ~(0x7u << 4));		/* COMMON0: FSEL=0 */
+	v = rd(h + 0x58); wr(h + 0x58, v | (1u << 5));		/* COMMON1: PLLBTUNE */
+	v = rd(h + 0xa0); wr(h + 0xa0, (v & ~3u) | 2u);		/* REFCLK_CTRL: REFCLK_SEL_DEFAULT */
+	v = rd(h + 0x58); wr(h + 0x58, v | (1u << 4));		/* COMMON1: VBUSVLDEXTSEL0 */
+	v = rd(h + 0x60); wr(h + 0x60, v | (1u << 0));		/* CTRL1: VBUSVLDEXT0 */
+	/* DT qcom,param-override-seq: <0xe7 0x6c 0x2c 0x70 0x3 0x74 0x3 0x78> */
+	wr(h + 0x6c, 0xe7); wr(h + 0x70, 0x2c); wr(h + 0x74, 0x03); wr(h + 0x78, 0x03);
+	v = rd(h + 0x5c); wr(h + 0x5c, v | (1u << 0));		/* COMMON2: VREGBYPASS */
+	v = rd(h + 0x64); wr(h + 0x64, v | (1u << 3) | (1u << 2));	/* CTRL2: SUSPEND_N_SEL | SUSPEND_N */
+	v = rd(h + 0x3c); wr(h + 0x3c, v | (1u << 0));		/* UTMI_CTRL0: SLEEPM */
+	v = rd(h + 0x54); wr(h + 0x54, v & ~(1u << 2));		/* COMMON0: SIDDQ off */
+	v = rd(h + 0x50); wr(h + 0x50, v & ~(1u << 1));		/* UTMI_CTRL5: POR off */
+	v = rd(h + 0x64); wr(h + 0x64, v & ~(1u << 3));		/* CTRL2: SUSPEND_N_SEL off */
+	v = rd(h + 0x94); wr(h + 0x94, v & ~(1u << 1));		/* CFG0: override enable off */
+}
+#endif
 
 int usb_power_up(void)
 {
@@ -151,17 +205,22 @@ int usb_power_up(void)
 		con_hex2("USBPWR", "utmi=", rd(GCC + MOCK_UTMI_CBCR), "sleep=", rd(GCC + SLEEP_CBCR));
 	}
 
-	/* controller and PHY resets, then the PHY init sequence ending in power-up (PWR_CTRL1 0x22) */
+	/* controller and PHY resets, then the PHY init sequence ending in power-up */
 	bcr_pulse(USB30_PRIM_BCR);
 	bcr_pulse(AHB2PHY_BCR);
+#ifdef BOARD_SM6375
+	snps_femto_init();
+	con_hex2("USBPWR", "phy cmn0=", rd(HSPHY + 0x54) & 0xff, "cmn1=", rd(HSPHY + 0x58) & 0xff);
+#else
 	wr(GCC + QUSB2PHY_BCR, 1);
 	udelay(100);
 	wr(GCC + QUSB2PHY_BCR, 0);
 	udelay(100);
 	for (unsigned k = 0; k < sizeof phy_seq / sizeof phy_seq[0]; k++)
-		wr(QUSB2 + phy_seq[k][1], phy_seq[k][0]);
+		wr(HSPHY + phy_seq[k][1], phy_seq[k][0]);
 	udelay(250);
-	con_hex2("USBPWR", "phy pwr=", rd(QUSB2 + 0x210) & 0xff, "pll=", rd(QUSB2 + 0x1a0) & 0xff);
+	con_hex2("USBPWR", "phy pwr=", rd(HSPHY + 0x210) & 0xff, "pll=", rd(HSPHY + 0x1a0) & 0xff);
+#endif
 
 	uint32_t id = rd(DWC3_GSNPSID);
 	con_hex2("USBPWR", "powered, gsnpsid=", id, "gdsc=", rd(GCC + USB30_GDSCR));

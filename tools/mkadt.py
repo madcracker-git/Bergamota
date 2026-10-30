@@ -33,8 +33,8 @@ VTIMER_INTID = 19
 QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
 QEMU_VTIMER_INTID = 27
 
-# Per-board differences; GIC, UFS, timer and the SoC window are the same on
-# SM7150 (sweet) and SDM845 (beryllium, Poco F1).
+# Per-board differences. The generic timer (19.2 MHz, vtimer INTID 19) and the
+# SoC window are the same on all three; GIC and UFS differ on SM6375.
 # Synthetic locally administered Bluetooth address (not the phone's): /chosen
 # mac-address-bluetooth0 and /arm-io/bluetooth local-mac-address, and what the
 # kernel writes into the WCN3990 with the QCA set-BD_ADDR vendor command.
@@ -45,7 +45,9 @@ BOARDS = {
         fb=(0x9c000000, 0x1700000), fb_wh=(1080, 2400),
         compat=['xiaomi,sweet', 'qcom,sm7150'],
         # 0-5 Cortex-A55, 6-7 Cortex-A76
-        cpu_compat='qcom,kryo470', big_from=6, freqs=(1804800000, 2304000000)),
+        cpu_compat='qcom,kryo470', big_from=6, freqs=(1804800000, 2304000000),
+        gicd=(0x17a00000, 0x10000), gicr=(0x17a60000, 0x100000),
+        ufs=(0x01d84000, 0x3000)),
     'beryllium': dict(
         # cont_splash_mem@9d400000, simple-framebuffer 1080x2246 (mainline beryllium-common)
         fb=(0x9d400000, 0x2400000), fb_wh=(1080, 2246),
@@ -53,6 +55,8 @@ BOARDS = {
         compat=['xiaomi,beryllium', 'xiaomi,sweet', 'qcom,sdm845'],
         # 0-3 Kryo 385 Silver (A55), 4-7 Gold (A75)
         cpu_compat='qcom,kryo385', big_from=4, freqs=(1766400000, 2803200000),
+        gicd=(0x17a00000, 0x10000), gicr=(0x17a60000, 0x100000),
+        ufs=(0x01d84000, 0x3000),
         # Without --highmem: low bank between cont_splash (ends 0x9f800000)
         # and ramoops@b0000000. --highmem: same window as sweet; the live
         # FDT memory is <0x80000000 3G>, <0x1_40000000 0xbd4a0000> and every
@@ -69,6 +73,28 @@ BOARDS = {
         ],
         # /arm-io/bluetooth for bluetoothd/BlueTool (docs/BT_IOS_TRANSPORT.md 3.2). Sweet has no
         # Bluetooth driver: the node is beryllium only.
+        bluetooth=True),
+    'sm6375': dict(
+        # splash_region@0x85200000 ("cont_splash_region"), 12 MiB, 1080x2400 (docs/SM6375_PORT.md)
+        fb=(0x85200000, 0xc00000), fb_wh=(1080, 2400),
+        # 'xiaomi,sweet' stays: SweetPlatformExpert matches it
+        compat=['qcom,blair', 'qcom,blair-qrd', 'qcom,qrd', 'xiaomi,sweet'],
+        # 0-5 Kryo 660 Silver (A55), 6-7 Gold (A78): all cores report 'qcom,kryo'
+        cpu_compat='qcom,kryo', big_from=6, freqs=(1804800000, 2208000000),
+        # GICv3 at interrupt-controller@f200000 / redistributor f240000 (live DT)
+        gicd=(0xf200000, 0x10000), gicr=(0xf240000, 0x100000),
+        # ufshc@4804000 (UFS 3.1)
+        ufs=(0x04804000, 0x3000),
+        # Without --highmem: the low bank's clean window between the carve-outs
+        # (cdsp ends 0x9d600000, kboot_uboot_logmem@0x9fe00000..0xa000000) and
+        # removed_region@0xc0000000. 0xa0000000..0xbb000000, 432 MiB.
+        mem=(0xa0000000, 0x1b000000),
+        # WCN3990 as on beryllium: synthetic locally administered addresses so
+        # lsd's first-boot seed does not stall on an absent Wi-Fi controller.
+        chosen_extra=[
+            ('mac-address-wifi0', bytes([0x02, 0x00, 0x5e, 0x77, 0xe0, 0x01])),
+            ('mac-address-bluetooth0', BT_MAC),
+        ],
         bluetooth=True),
 }
 
@@ -171,7 +197,14 @@ def build(seed=None, qemu=False, highmem=False, board='sweet', display_scale=3, 
             raise SystemExit(f'--lowpool {lp_base:#x}:{lp_size:#x}: must be 16K aligned inside {LOWPOOL_MIN:#x}..{LOWPOOL_MAX:#x}')
         if lp_base < phys_base + mem_size and phys_base < lp_base + lp_size:
             raise SystemExit(f'--lowpool {lp_base:#x}:{lp_size:#x} overlaps the kernel RAM {phys_base:#x}+{mem_size:#x}')
-    gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
+    gicd, gicd_size = b['gicd']
+    gicr, gicr_size = b['gicr']
+    if qemu:
+        gicd, gicd_size = QEMU_GICD, 0x10000
+        gicr, gicr_size = QEMU_GICR, 0x100000
+        timebase = QEMU_TIMEBASE
+    else:
+        timebase = TIMEBASE
     # 256 bytes: xnu-12377 asks the bootloader for 4 * SHA-512 (prng_random.c, panics "Expected 256 seed bytes from
     # bootloader, but got 64"); older kernels copy only the 64 they ask for (PE_get_random_seed clamps)
     seed = seed if seed is not None else os.urandom(256)
@@ -259,7 +292,7 @@ def build(seed=None, qemu=False, highmem=False, board='sweet', display_scale=3, 
         ('compatible', cstr('arm,gic-v3')),
         ('interrupt-controller', b''),
         ('virtual-timer-intid', u32(QEMU_VTIMER_INTID if qemu else VTIMER_INTID)),
-        ('reg', u64(gicd - SOC_BASE, GICD_SIZE, gicr - SOC_BASE, GICR_SIZE)),
+        ('reg', u64(gicd - SOC_BASE, gicd_size, gicr - SOC_BASE, gicr_size)),
     ])
     arm_io = node('arm-io', [
         ph(),
@@ -303,7 +336,7 @@ def build(seed=None, qemu=False, highmem=False, board='sweet', display_scale=3, 
     ufs = node('sweet-ufs', [
         ph(),
         ('compatible', cstr('qcom,ufshc')),
-        ('reg', u64(UFS, UFS_SIZE)),
+        ('reg', u64(b['ufs'][0], b['ufs'][1])),
     ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.

@@ -2,6 +2,7 @@
 # Build Enxerto (the bootloader) and wrap it in an Android boot.img that ABL accepts.
 #   BOARD=sweet (default)  boot.img v2 mirroring the stock PixelOS header, DTB in the header
 #   BOARD=beryllium        boot.img v1, Image.gz + appended DTB like the Poco F1 ROM (SDM845 ABL)
+#   BOARD=sm6375           boot.img v3 (virtual A/B), Image.gz + appended merged live DTB (Nord CE 3 Lite)
 # Usage: [BOARD=..] [DTB=..] ./build.sh [payload.bin]
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -29,6 +30,7 @@ CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align
 case $BOARD in
 sweet)		DTB=${DTB:-../dtb/boot_unpacked/dtb} ;;
 beryllium)	DTB=${DTB:-../dtb/beryllium/dtb}; CFLAGS="$CFLAGS -DBOARD_BERYLLIUM" ;;
+sm6375)		DTB=${DTB:-../dtb/sm6375/live.dtb}; CFLAGS="$CFLAGS -DBOARD_SM6375 -DFB_PRODUCT=\"sm6375\"" ;;
 *)		echo "error: unknown BOARD=$BOARD" >&2; exit 1 ;;
 esac
 [ -f "$DTB" ] || { echo "error: $DTB missing (stock DTB of the phone, see README)" >&2; exit 1; }
@@ -72,6 +74,15 @@ if [ "$BOARD" = beryllium ]; then
 		--base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 \
 		--tags_offset 0x100 --pagesize 4096 --os_version 16.0.0 --os_patch_level 2025-06 \
 		--cmdline "$CMDLINE" -o out/enxerto-boot.img
+elif [ "$BOARD" = sm6375 ]; then
+	# GKI / virtual A/B (header v3): the ABL boots a RAW Linux arm64 Image and
+	# supplies the device tree itself (vendor_boot base DTB + dtbo overlay), so
+	# nothing is appended. Enxerto reads the DTB from x0 (start.S). Confirmed
+	# against the stock boot_b.img: raw Image (no gzip magic), no FDT in the
+	# kernel. docs/SM6375_PORT.md M1.
+	mkbootimg --header_version 3 --kernel out/Image --ramdisk out/ramdisk.bin \
+		--pagesize 4096 --os_version 17.0.0 --os_patch_level 2026-10 \
+		--cmdline "$CMDLINE" -o out/enxerto-boot.img
 else
 	mkbootimg --header_version 2 --kernel out/Image --ramdisk out/ramdisk.bin \
 		--dtb "$DTB" --base 0 --kernel_offset 0x8000 --ramdisk_offset 0x1000000 \
@@ -90,7 +101,12 @@ if [ "$BOARD" = beryllium ]; then
 fi
 # Host render of the console layout and the boot screen (out/host.ppm, out/preview/*.ppm).
 mkdir -p out/preview
-cc -O1 -Wall $([ "$BOARD" = beryllium ] && echo -DBOARD_BERYLLIUM) $([ "${BOOTLOG:-0}" = 0 ] || echo -DBOOTUI_LOG=1) -o out/host_test console.c artdraw.c bootui.c fbui.c charge.c host_test.c && ./out/host_test
+case "$BOARD" in
+beryllium)	BOARD_DEF=-DBOARD_BERYLLIUM ;;
+sm6375)		BOARD_DEF=-DBOARD_SM6375 ;;
+*)		BOARD_DEF= ;;
+esac
+cc -O1 -Wall $BOARD_DEF $([ "${BOOTLOG:-0}" = 0 ] || echo -DBOOTUI_LOG=1) -o out/host_test console.c artdraw.c bootui.c fbui.c charge.c host_test.c && ./out/host_test
 # Host tests of the fastboot protocol, the sparse parser, GPT/allowlist storage and BLAKE2b (fake storage).
 cc -O1 -Wall -Wextra -o out/fastboot_test fastboot.c sparse.c storage.c blake2b.c fastboot_test.c && ./out/fastboot_test
 # The image Bergamota (the Mac app) boots from ABL with `fastboot boot`: fastboot forced on, empty ramdisk.
@@ -100,6 +116,11 @@ if [ "$BOARD" = beryllium ]; then
 		--tags_offset 0x100 --pagesize 4096 --os_version 16.0.0 --os_patch_level 2025-06 \
 		--cmdline "console=null bergamota.fastboot=1" -o out/bergamota-fastboot.img
 	# same image under the name the Mac app looks for first (the flash-capable build)
+	cp out/bergamota-fastboot.img out/bergamota-fastboot-flash.img
+elif [ "$BOARD" = sm6375 ]; then
+	mkbootimg --header_version 3 --kernel out/Image --ramdisk out/ramdisk-empty.bin \
+		--pagesize 4096 --os_version 17.0.0 --os_patch_level 2026-10 \
+		--cmdline "console=null bergamota.fastboot=1" -o out/bergamota-fastboot.img
 	cp out/bergamota-fastboot.img out/bergamota-fastboot-flash.img
 fi
 # IMGSUFFIX=-chg: also keep the images under suffixed names (never overwrites another build's files)

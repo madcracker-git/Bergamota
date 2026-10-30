@@ -20,10 +20,31 @@
 #include "board.h"
 #include "usb_dwc3.h"
 
+#ifdef BOARD_SM6375
+/* SM6375 "blair" (OnePlus Nord CE 3 Lite): gcc-sm6375.c + live DT + dwc3-qcom.c. */
+#define GCC_BASE		0x1400000UL
+#define GCC_USB30_PRIM_GDSCR	0x1a004
+#define DWC3_BASE		0x04e00000UL	/* ssusb@4e00000 + dwc3@4e00000 */
+#define QSCRATCH_BASE		0x04ef8800UL	/* DWC3_BASE + 0xf8800 (dwc3-qcom.c, fixed) */
+#else
 #define GCC_BASE		0x00100000UL
 #define GCC_USB30_PRIM_GDSCR	0x0f004
+#define DWC3_BASE		0x0a600000UL
+#define QSCRATCH_BASE		0x0a6f8800UL
+#endif
 #define CBCR_CLK_OFF		(1u << 31)
 
+#ifdef BOARD_SM6375
+static const uint32_t usb_cbcr[] = {
+	0x1a010,	/* [0] master */
+	0x1a014,	/* sleep */
+	0x1a018,	/* mock utmi */
+	0x1a084,	/* [3] cfg-noc-axi */
+	0x1a080,	/* sys-noc-axi (aggre) */
+	0x1d008,	/* [5] ahb2phy */
+	0x8c010,	/* clkref */
+};
+#else
 static const uint32_t usb_cbcr[] = {
 	0x0f010,	/* [0] master */
 	0x0f014,	/* sleep */
@@ -33,17 +54,35 @@ static const uint32_t usb_cbcr[] = {
 	0x6a004,	/* [5] ahb2phy */
 	0x8c010,	/* clkref */
 };
+#endif
 #define N_CBCR		(sizeof usb_cbcr / sizeof usb_cbcr[0])
 
-#define DWC3_BASE	0x0a600000UL
-#define QUSB2_BASE	0x088e2000UL
-#define QUSB2_PWR_CTRL1	0x210
-#define QUSB2_PLL_STATUS 0x1a0
-#define QUSB2_PWR_DOWN	0x01u
-#define QUSB2_CLAMP_N_EN 0x02u
-#define QUSB2_PLL_LOCKED 0x20u
-/* Qualcomm wrapper ("QSCRATCH") */
-#define QSCRATCH_BASE		0x0a6f8800UL
+/* HS PHY: SDM845 = QUSB2, SM6375 = SNPS femto-v2 (different register maps). */
+#ifdef BOARD_SM6375
+#define HSPHY_BASE		0x162b000UL	/* hsphy@162b000 */
+/* snps-femto-v2 (phy-qcom-snps-femto-v2.c) */
+#define HSPHY_UTMI_CTRL0	0x3c
+#define HSPHY_UTMI_CTRL5	0x50
+#define HSPHY_CTRL_COMMON0	0x54
+#define HSPHY_CTRL_COMMON1	0x58
+#define HSPHY_CTRL_COMMON2	0x5c
+#define HSPHY_CTRL1		0x60
+#define HSPHY_CTRL2		0x64
+#define HSPHY_OVERRIDE_X0	0x6c
+#define HSPHY_OVERRIDE_X1	0x70
+#define HSPHY_OVERRIDE_X2	0x74
+#define HSPHY_OVERRIDE_X3	0x78
+#define HSPHY_CFG0		0x94
+#define HSPHY_REFCLK_CTRL	0xa0
+#else
+#define HSPHY_BASE		0x088e2000UL	/* qusb2 */
+#define QUSB2_PWR_CTRL1		0x210
+#define QUSB2_PLL_STATUS	0x1a0
+#define QUSB2_PWR_DOWN		0x01u
+#define QUSB2_CLAMP_N_EN	0x02u
+#define QUSB2_PLL_LOCKED	0x20u
+#endif
+/* Qualcomm wrapper ("QSCRATCH") register offsets (same on all SoCs) */
 #define QS_GENERAL_CFG		0x08
 #define QS_HS_PHY_CTRL		0x10
 #define   UTMI_OTG_VBUS_VALID	(1u << 20)
@@ -757,17 +796,52 @@ int usb_dwc3_init(int use_smmu)
 	udelay(1000);
 	usb_info.qscratch_gen_cfg = rd_at(cfg);
 
-	/* 2. QUSB2 PHY power-up: ABL leaves PWR_CTRL1.POWER_DOWN set (the sweetusbfix finding). */
-	uint32_t pwr = rd_at(QUSB2_BASE + QUSB2_PWR_CTRL1) & 0xff;
+	/* 2. HS PHY power-up: SDM845 leaves QUSB2 PWR_CTRL1.POWER_DOWN set (sweetusbfix);
+	 * SM6375 snps-femto-v2 needs the full Linux init sequence (phy-qcom-snps-femto-v2.c). */
+#ifdef BOARD_SM6375
+	{
+		/* phy reset pulse: GCC_QUSB2PHY_PRIM_BCR (gcc-sm6375.c 0x1c000) */
+		wr_at(GCC_BASE + 0x1c000, 1);
+		udelay(150);
+		wr_at(GCC_BASE + 0x1c000, 0);
+		udelay(150);
+		uint32_t h = HSPHY_BASE;
+		uint32_t v;
+		v = rd_at(h + HSPHY_CFG0); wr_at(h + HSPHY_CFG0, v | (1u << 1));	/* UTMI_PHY_CMN_CTRL_OVERRIDE_EN */
+		v = rd_at(h + HSPHY_UTMI_CTRL5); wr_at(h + HSPHY_UTMI_CTRL5, v | (1u << 1));	/* POR */
+		v = rd_at(h + HSPHY_CTRL_COMMON0); wr_at(h + HSPHY_CTRL_COMMON0, v & ~(0x7u << 4));	/* FSEL=0 */
+		v = rd_at(h + HSPHY_CTRL_COMMON1); wr_at(h + HSPHY_CTRL_COMMON1, v | (1u << 5));	/* PLLBTUNE */
+		v = rd_at(h + HSPHY_REFCLK_CTRL); wr_at(h + HSPHY_REFCLK_CTRL, (v & ~3u) | 2u);	/* REFCLK_SEL_DEFAULT */
+		v = rd_at(h + HSPHY_CTRL_COMMON1); wr_at(h + HSPHY_CTRL_COMMON1, v | (1u << 4));	/* VBUSVLDEXTSEL0 */
+		v = rd_at(h + HSPHY_CTRL1); wr_at(h + HSPHY_CTRL1, v | (1u << 0));	/* VBUSVLDEXT0 */
+		/* DT qcom,param-override-seq: <0xe7 0x6c 0x2c 0x70 0x3 0x74 0x3 0x78> (value, offset) */
+		wr_at(h + HSPHY_OVERRIDE_X0, 0xe7);
+		wr_at(h + HSPHY_OVERRIDE_X1, 0x2c);
+		wr_at(h + HSPHY_OVERRIDE_X2, 0x03);
+		wr_at(h + HSPHY_OVERRIDE_X3, 0x03);
+		v = rd_at(h + HSPHY_CTRL_COMMON2); wr_at(h + HSPHY_CTRL_COMMON2, v | (1u << 0));	/* VREGBYPASS */
+		v = rd_at(h + HSPHY_CTRL2); wr_at(h + HSPHY_CTRL2, v | (1u << 3) | (1u << 2));	/* SUSPEND_N_SEL | SUSPEND_N */
+		v = rd_at(h + HSPHY_UTMI_CTRL0); wr_at(h + HSPHY_UTMI_CTRL0, v | (1u << 0));	/* SLEEPM */
+		v = rd_at(h + HSPHY_CTRL_COMMON0); wr_at(h + HSPHY_CTRL_COMMON0, v & ~(1u << 2));	/* SIDDQ off */
+		v = rd_at(h + HSPHY_UTMI_CTRL5); wr_at(h + HSPHY_UTMI_CTRL5, v & ~(1u << 1));	/* POR off */
+		v = rd_at(h + HSPHY_CTRL2); wr_at(h + HSPHY_CTRL2, v & ~(1u << 3));	/* SUSPEND_N_SEL off */
+		v = rd_at(h + HSPHY_CFG0); wr_at(h + HSPHY_CFG0, v & ~(1u << 1));	/* override enable off */
+		usb_info.qusb_pwr_before = rd_at(h + HSPHY_CTRL_COMMON0) & 0xff;
+		usb_info.qusb_pwr_after = rd_at(h + HSPHY_CTRL2) & 0xff;
+		usb_info.qusb_pll_after = rd_at(h + HSPHY_CTRL_COMMON1) & 0xff;
+	}
+#else
+	uint32_t pwr = rd_at(HSPHY_BASE + QUSB2_PWR_CTRL1) & 0xff;
 	usb_info.qusb_pwr_before = pwr;
 	if (pwr & QUSB2_PWR_DOWN) {
-		wr_at(QUSB2_BASE + QUSB2_PWR_CTRL1, (pwr & ~QUSB2_PWR_DOWN) | QUSB2_CLAMP_N_EN);
+		wr_at(HSPHY_BASE + QUSB2_PWR_CTRL1, (pwr & ~QUSB2_PWR_DOWN) | QUSB2_CLAMP_N_EN);
 		udelay(250);
 	}
-	for (int i = 0; i < 1000 && !(rd_at(QUSB2_BASE + QUSB2_PLL_STATUS) & QUSB2_PLL_LOCKED); i++)
+	for (int i = 0; i < 1000 && !(rd_at(HSPHY_BASE + QUSB2_PLL_STATUS) & QUSB2_PLL_LOCKED); i++)
 		udelay(1);
-	usb_info.qusb_pwr_after = rd_at(QUSB2_BASE + QUSB2_PWR_CTRL1) & 0xff;
-	usb_info.qusb_pll_after = rd_at(QUSB2_BASE + QUSB2_PLL_STATUS) & 0xff;
+	usb_info.qusb_pwr_after = rd_at(HSPHY_BASE + QUSB2_PWR_CTRL1) & 0xff;
+	usb_info.qusb_pll_after = rd_at(HSPHY_BASE + QUSB2_PLL_STATUS) & 0xff;
+#endif
 
 	/* 3. Linux dwc3_core_soft_reset() without the PHY framework, then DCTL.CSFTRST */
 	uint32_t gctl_abl = rd(GCTL);
