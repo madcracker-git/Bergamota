@@ -362,6 +362,34 @@ So the first boot path needs no new kernel source: build the full default series
 **Exit:** the kernel prints its boot log to the panel/serial and reaches
 `launchd` (or at least a stable console with a panic we can iterate on).
 
+### ✅ M2 milestone (2026-10-30): kernel boots the full early sequence
+
+The corrected kernel (0252) booted the **entire** early sequence to the panel:
+
+```
+SWEET EARLY 1..20: arm_init → PE_init_platform → cpu topology → cpu_bootstrap
+  → arm_vm_init → pmap_bootstrap → serial_init → fbcon → kprintf startup complete
+SWEET EARLY PANIC: pmap_map_bd @pmap.c:1962
+```
+
+So arm_init, the GIC/ADT early path, `arm_vm_init`, `pmap_bootstrap`, the early
+I/O page tables, serial_init + fbcon and kprintf all succeed. The first panic is
+`pmap_map_bd` (pmap.c:1962): `pmap_pte(kernel_pmap, vaddr)` returns
+`PT_ENTRY_NULL` while `io_map`'s early path maps a device after kprintf — the
+`virtual_space_start` VA advanced past the early-I/O page-table range, or a
+specific map targets an unmapped VA. Candidates: `pe_init_fiq` (GIC at
+0xf200000/0xf240000) via `PE_init_cpu`, or `PE_init_platform(TRUE)`.
+
+**Diagnostic added (0253):** the panic now prints `va=`/`pa=`, so the next boot
+names the exact failing map. `mem_segments` for 384 MB = 2 → ~32 MB early-I/O
+budget (fbcon 12 MB + GIC ~1 MB should fit), so the failing VA/PA will point at
+the real cause. Rebuild dispatched (run 40995373214).
+
+**Side finding:** `serial_init()` returns 0 for SWEET (the ADT `defaults` node
+has no `serial-device` phandle), so `sweet_early_disable()` never runs and the
+early console stays active — kprintf output after stage 20 is invisible, but
+panics still show. (This matches beryllium; it is not the panic.)
+
 ### M3 — Renegade root (mostly a formality)
 
 1. Build the iOS 18.7.8 root exactly as today (`tools/renegade/renegade
