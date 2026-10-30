@@ -24,7 +24,7 @@ index b77c53c..ad17fa7 100644
  
  	DECLARE("SR_RESTORE_TCR_EL1", offsetof(struct sysreg_restore, tcr_el1));
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index e8f555e..fc300a6 100644
+index e8f555e..da22482 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
 @@ -523,8 +523,12 @@ LEXT(start_first_cpu)
@@ -42,16 +42,53 @@ index e8f555e..fc300a6 100644
  	mov		w1, #-1
  	mov		x2, #32
  	mov		x4, #4320
-@@ -695,7 +699,8 @@ Lkernelcache_base_found:
- 	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
- 	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
+@@ -689,19 +693,38 @@ Lkernelcache_base_found:
+ 
+ #if defined(SWEET)
+ 	/*
+-	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
+-	 * L2 table. Both framebuffer and RAM use L1 index 0; another call to
+-	 * create_bootstrap_mapping would replace the RAM L2 table.
+-	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
+-	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
++	 * Splash framebuffer: one 32MB Normal-NC block, VA = PA. The FB may sit in
++	 * a different L1 entry than the kernel RAM (sm6375: FB 0x85200000 in L1
++	 * index 2, RAM 0x180000000 in L1 index 6), so give it its own L1 entry and
++	 * L2 table rather than assuming it shares the RAM L1 table (which only
++	 * holds when both sit in the same L1 index, i.e. below the same 1 GiB).
  	 */
 -	MOV64	x10, 0x9c000000
 +	ldr		x10, [x20, BA_VIDEO_BASE]
 +	bic		x10, x10, #0x1ffffff	/* round down to the 32MB block holding the FB */
++	/* allocate + zero an L2 table at the free pointer (x2) */
++	mov		x14, x2
++	add		x2, x2, PGBYTES
++	mov		x15, #(TTE_PGENTRIES)
++	mov		x16, x14
++Lsweet_fb_zloop:
++	str		xzr, [x16], #(1 << TTE_SHIFT)
++	subs	x15, x15, #1
++	b.ne	Lsweet_fb_zloop
++	/* L1 entry for the FB VA -> this L2 table (V=P L1 table base is x1) */
++	and		x15, x10, #(ARM_TT_L1_INDEX_MASK)
++	lsr		x15, x15, #(ARM_TT_L1_SHIFT)
++	lsl		x15, x15, #(TTE_SHIFT)
++	add		x15, x1, x15
++	mov		x16, #(ARM_TTE_BOOT_TABLE)
++	and		x17, x14, #(ARM_TTE_TABLE_MASK)
++	orr		x16, x16, x17
++	str		x16, [x15]
++	/* the 32MB write-combining block entry in the FB L2 table */
  	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
  	orr		x11, x11, x10
  	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
+ 	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
+-	add		x13, x25, #(2 * PGBYTES)
+-	str		x11, [x13, x12, lsl #TTE_SHIFT]
++	str		x11, [x14, x12, lsl #TTE_SHIFT]
+ #endif
+ 
+ 	/* Ensure TTEs are visible */
 diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
 index 7dcca46..a7f18dd 100644
 --- a/osfmk/arm64/sweet_early.c
