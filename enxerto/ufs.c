@@ -38,6 +38,16 @@
 #define REG_UIC_ARG3	0x9c
 #define REG_IE		0x24
 
+/* SM6375 QMP UFS PHY (qcom,ufs-phy-qmp-v4-yupik): the PHY block the controller
+ * drives. Init sequence from Qualcomm's vendor phy-qcom-ufs-qmp-v4-yupik.c. */
+#define UFS_PHY_BASE	0x4807000UL	/* ufsphy_mem@4807000 */
+#define UFS_PHY_SW_RESET	0xc08
+#define UFS_PHY_PHY_START	0xc00
+#define UFS_PHY_PCS_READY	0xd80
+#define UFS_PHY_PWR_DOWN	0xc04
+#define GCC_UFS_PHY_GDSCR	0x45004		/* gcc ufs_phy_gdsc */
+#define GCC_UFS_PHY_BCR		0x45000		/* gcc ufs_phy_bcr (reset) */
+
 #define HCS_DP		(1u << 0)
 #define HCS_UTRLRDY	(1u << 1)
 #define HCS_UTMRLRDY	(1u << 2)
@@ -492,6 +502,63 @@ static int query_req(unsigned lun, uint8_t opcode, uint8_t idn, uint32_t value, 
 	return ufs_last.rc = 0;
 }
 
+/* QMP UFS PHY calibration (vendor phy_cal_table_rate_A_no_g4, SM6375 non-G4,
+ * 1 lane): (offset-from-PHY-base, value) pairs, written while SW_RESET is held. */
+static const uint16_t ufs_phy_cal[][2] = {
+	{ 0xc04, 0x01 }, { 0x094, 0xd9 }, { 0x158, 0x11 }, { 0x15c, 0x00 }, { 0x0a4, 0x01 },
+	{ 0x10c, 0x02 }, { 0x058, 0x0f }, { 0x124, 0x00 }, { 0x1bc, 0x11 }, { 0x0bc, 0x82 },
+	{ 0x074, 0x06 }, { 0x07c, 0x16 }, { 0x084, 0x36 }, { 0x0ac, 0xff }, { 0x0b0, 0x0c },
+	{ 0x1ac, 0xac }, { 0x1b0, 0x1e }, { 0x0c4, 0x98 }, { 0x078, 0x06 }, { 0x080, 0x16 },
+	{ 0x088, 0x36 }, { 0x0b4, 0x32 }, { 0x0b8, 0x0f }, { 0x1b4, 0xdd }, { 0x1b8, 0x23 },
+	{ 0x4d8, 0x06 }, { 0x4dc, 0x03 }, { 0x4e0, 0x01 }, { 0x4e4, 0x00 }, { 0x484, 0x35 },
+	{ 0x4b8, 0x0c }, { 0x720, 0x24 }, { 0x71c, 0x0f }, { 0x724, 0x1e }, { 0x728, 0x18 },
+	{ 0x630, 0x0a }, { 0x634, 0x5a }, { 0x644, 0xf1 }, { 0x63c, 0x80 }, { 0x648, 0x80 },
+	{ 0x608, 0x0e }, { 0x614, 0x04 }, { 0x680, 0x1b }, { 0x6ec, 0x06 }, { 0x6f0, 0x04 },
+	{ 0x6f4, 0x1d }, { 0x714, 0x00 }, { 0x700, 0x10 }, { 0x6f8, 0xc0 }, { 0x6fc, 0x00 },
+	{ 0x770, 0x6d }, { 0x774, 0x6d }, { 0x778, 0xed }, { 0x77c, 0x3b }, { 0x780, 0x3c },
+	{ 0x784, 0xe0 }, { 0x788, 0xc8 }, { 0x78c, 0xc8 }, { 0x790, 0x3b }, { 0x794, 0xb1 },
+	{ 0x798, 0xe0 }, { 0x79c, 0xc8 }, { 0x7a0, 0xc8 }, { 0x7a4, 0x3b }, { 0x7a8, 0xb1 },
+	{ 0x7bc, 0x0c }, { 0xd58, 0x6d }, { 0xc30, 0x0a }, { 0xc38, 0x02 }, { 0xdd8, 0x43 },
+	{ 0xd24, 0x1f }, { 0xd50, 0xff }, { 0xc2c, 0x03 }, { 0xc0c, 0x16 }, { 0xc10, 0xd8 },
+	{ 0xd60, 0xaa }, { 0xd68, 0x06 }, { 0xc74, 0x03 }, { 0xcb4, 0x03 },
+};
+
+/* Bring the SM6375 QMP UFS PHY out of reset and run the vendor calibration
+ * (phy_init + phy_power_on + calibrate). Runs BEFORE the controller is touched;
+ * the UniPro link cannot train without it. */
+static int ufs_phy_init(void)
+{
+	volatile uint32_t *gcc = (volatile uint32_t *)0x1400000UL;
+	volatile uint32_t *phy = (volatile uint32_t *)UFS_PHY_BASE;
+
+	/* power the PHY domain (ufs_phy_gdsc): clear SW_COLLAPSE, wait PWR_ON */
+	uint32_t g = gcc[GCC_UFS_PHY_GDSCR / 4];
+	gcc[GCC_UFS_PHY_GDSCR / 4] = g & ~1u;
+	for (int i = 0; i < 2000 && !(gcc[GCC_UFS_PHY_GDSCR / 4] & (1u << 31)); i++)
+		udelay(5);
+
+	/* assert PHY reset, hold SW_RESET, write calibration, release */
+	gcc[GCC_UFS_PHY_BCR / 4] |= 1u;			/* reset assert */
+	udelay(100);
+	phy[UFS_PHY_SW_RESET / 4] = 0x01;		/* PHY software reset */
+	__asm__ volatile("dmb sy" ::: "memory");
+	for (unsigned k = 0; k < sizeof ufs_phy_cal / sizeof ufs_phy_cal[0]; k++)
+		phy[ufs_phy_cal[k][0] / 4] = ufs_phy_cal[k][1];
+	phy[UFS_PHY_SW_RESET / 4] = 0x00;		/* release software reset */
+	__asm__ volatile("dmb sy" ::: "memory");
+	gcc[GCC_UFS_PHY_BCR / 4] &= ~1u;		/* reset deassert */
+	udelay(100);
+
+	/* start the SERDES and wait for the PCS (physical coding sublayer) */
+	phy[UFS_PHY_PHY_START / 4] = 0x01;
+	__asm__ volatile("dmb sy" ::: "memory");
+	for (int i = 0; i < 2000 && !(phy[UFS_PHY_PCS_READY / 4] & 1); i++)
+		udelay(500);				/* up to ~1 s */
+	if (!(phy[UFS_PHY_PCS_READY / 4] & 1))
+		return UFS_E_NOTREADY;
+	return 0;
+}
+
 /* Re-run the host-controller enable (Linux ufshcd_hba_execute_hce): toggle HCE
  * off then on. The controller then re-initialises and asserts UICRDY (the
  * transfer/task list ready bits come later, after the lists + run-stop are
@@ -552,11 +619,19 @@ int ufs_init(void)
 	if (inited)
 		return 0;
 	cap_reg = ufs_rd(REG_CAP);
+	/* SM6375: the Qualcomm QMP UFS PHY must be initialised first (Linux
+	 * phy_init + phy_power_on + calibrate); the UniPro link cannot train
+	 * without it and the device then stays "initializing". */
+	ufs_last.stage = 0;			/* QMP PHY init */
+	int rc = ufs_phy_init();
+	ufs_last.hcs = ufs_rd(REG_HCS);
+	if (rc)
+		return rc;
 	/* Re-run HCE so the controller re-initialises; UICRDY asserts, but DP and
 	 * the list-ready bits only come back after DME_LINK_STARTUP re-trains the
 	 * UniPro link. */
-	ufs_last.stage = 0;			/* HCE re-execute */
-	int rc = ufs_hce_execute();
+	ufs_last.stage = 1;			/* HCE re-execute */
+	rc = ufs_hce_execute();
 	ufs_last.hcs = ufs_rd(REG_HCS);
 	if (rc)
 		return rc;
@@ -564,7 +639,7 @@ int ufs_init(void)
 		return UFS_E_NOTREADY;
 
 	/* UniPro link startup: train the link; DP + list-ready come back here */
-	ufs_last.stage = 1;			/* DME_LINK_STARTUP */
+	ufs_last.stage = 2;			/* DME_LINK_STARTUP */
 	rc = ufs_dme_link_startup();
 	ufs_last.hcs = ufs_rd(REG_HCS);
 	if (rc)
