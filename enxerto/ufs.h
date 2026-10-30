@@ -28,6 +28,8 @@ struct ufs_last {
 	uint32_t target;	/* UFS status byte of the RESPONSE UPIU (0 = success) */
 	uint32_t stage;		/* init progress marker (0 = none, N = where it stopped) */
 	uint32_t hcs, is, cfg1;	/* raw host registers for the diagnostic */
+	uint32_t refclk;	/* bRefClkFreq attribute the device reports (0=19.2MHz,1=26MHz) */
+	uint32_t fdi;		/* fDeviceInit flag value last read */
 	int rc;
 };
 extern struct ufs_last ufs_last;

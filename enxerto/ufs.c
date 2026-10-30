@@ -32,29 +32,9 @@
 #define REG_UTRLDBR	0x58
 #define REG_UTRLCLR	0x5c
 #define REG_UTRLRSR	0x60
-#define REG_UIC_CMD	0x90
-#define REG_UIC_ARG1	0x94
-#define REG_UIC_ARG2	0x98
-#define REG_UIC_ARG3	0x9c
-#define REG_IE		0x24
-
-/* SM6375 QMP UFS PHY (qcom,ufs-phy-qmp-v4-yupik): the PHY block the controller
- * drives. Init sequence from Qualcomm's vendor phy-qcom-ufs-qmp-v4-yupik.c. */
-#define UFS_PHY_BASE	0x4807000UL	/* ufsphy_mem@4807000 */
-#define UFS_PHY_SW_RESET	0xc08
-#define UFS_PHY_PHY_START	0xc00
-#define UFS_PHY_PCS_READY	0xd80
-#define UFS_PHY_PWR_DOWN	0xc04
-#define GCC_UFS_PHY_GDSCR	0x45004		/* gcc ufs_phy_gdsc */
-#define GCC_UFS_PHY_BCR		0x45000		/* gcc ufs_phy_bcr (reset) */
 
 #define HCS_DP		(1u << 0)
 #define HCS_UTRLRDY	(1u << 1)
-#define HCS_UTMRLRDY	(1u << 2)
-#define HCS_UICRDY	(1u << 3)
-
-#define UIC_DME_LINK_STARTUP	0x16
-#define IS_UIC_CMD_COMPL	(1u << 10)
 
 #define CAP_64AS	(1u << 24)
 
@@ -502,116 +482,6 @@ static int query_req(unsigned lun, uint8_t opcode, uint8_t idn, uint32_t value, 
 	return ufs_last.rc = 0;
 }
 
-/* QMP UFS PHY calibration (vendor phy_cal_table_rate_A_no_g4, SM6375 non-G4,
- * 1 lane): (offset-from-PHY-base, value) pairs, written while SW_RESET is held. */
-static const uint16_t ufs_phy_cal[][2] = {
-	{ 0xc04, 0x01 }, { 0x094, 0xd9 }, { 0x158, 0x11 }, { 0x15c, 0x00 }, { 0x0a4, 0x01 },
-	{ 0x10c, 0x02 }, { 0x058, 0x0f }, { 0x124, 0x00 }, { 0x1bc, 0x11 }, { 0x0bc, 0x82 },
-	{ 0x074, 0x06 }, { 0x07c, 0x16 }, { 0x084, 0x36 }, { 0x0ac, 0xff }, { 0x0b0, 0x0c },
-	{ 0x1ac, 0xac }, { 0x1b0, 0x1e }, { 0x0c4, 0x98 }, { 0x078, 0x06 }, { 0x080, 0x16 },
-	{ 0x088, 0x36 }, { 0x0b4, 0x32 }, { 0x0b8, 0x0f }, { 0x1b4, 0xdd }, { 0x1b8, 0x23 },
-	{ 0x4d8, 0x06 }, { 0x4dc, 0x03 }, { 0x4e0, 0x01 }, { 0x4e4, 0x00 }, { 0x484, 0x35 },
-	{ 0x4b8, 0x0c }, { 0x720, 0x24 }, { 0x71c, 0x0f }, { 0x724, 0x1e }, { 0x728, 0x18 },
-	{ 0x630, 0x0a }, { 0x634, 0x5a }, { 0x644, 0xf1 }, { 0x63c, 0x80 }, { 0x648, 0x80 },
-	{ 0x608, 0x0e }, { 0x614, 0x04 }, { 0x680, 0x1b }, { 0x6ec, 0x06 }, { 0x6f0, 0x04 },
-	{ 0x6f4, 0x1d }, { 0x714, 0x00 }, { 0x700, 0x10 }, { 0x6f8, 0xc0 }, { 0x6fc, 0x00 },
-	{ 0x770, 0x6d }, { 0x774, 0x6d }, { 0x778, 0xed }, { 0x77c, 0x3b }, { 0x780, 0x3c },
-	{ 0x784, 0xe0 }, { 0x788, 0xc8 }, { 0x78c, 0xc8 }, { 0x790, 0x3b }, { 0x794, 0xb1 },
-	{ 0x798, 0xe0 }, { 0x79c, 0xc8 }, { 0x7a0, 0xc8 }, { 0x7a4, 0x3b }, { 0x7a8, 0xb1 },
-	{ 0x7bc, 0x0c }, { 0xd58, 0x6d }, { 0xc30, 0x0a }, { 0xc38, 0x02 }, { 0xdd8, 0x43 },
-	{ 0xd24, 0x1f }, { 0xd50, 0xff }, { 0xc2c, 0x03 }, { 0xc0c, 0x16 }, { 0xc10, 0xd8 },
-	{ 0xd60, 0xaa }, { 0xd68, 0x06 }, { 0xc74, 0x03 }, { 0xcb4, 0x03 },
-};
-
-/* Bring the SM6375 QMP UFS PHY out of reset and run the vendor calibration
- * (phy_init + phy_power_on + calibrate). Runs BEFORE the controller is touched;
- * the UniPro link cannot train without it. */
-static int ufs_phy_init(void)
-{
-	volatile uint32_t *gcc = (volatile uint32_t *)0x1400000UL;
-	volatile uint32_t *phy = (volatile uint32_t *)UFS_PHY_BASE;
-
-	/* power the PHY domain (ufs_phy_gdsc): clear SW_COLLAPSE, wait PWR_ON */
-	uint32_t g = gcc[GCC_UFS_PHY_GDSCR / 4];
-	gcc[GCC_UFS_PHY_GDSCR / 4] = g & ~1u;
-	for (int i = 0; i < 2000 && !(gcc[GCC_UFS_PHY_GDSCR / 4] & (1u << 31)); i++)
-		udelay(5);
-
-	/* assert PHY reset, hold SW_RESET, write calibration, release */
-	gcc[GCC_UFS_PHY_BCR / 4] |= 1u;			/* reset assert */
-	udelay(100);
-	phy[UFS_PHY_SW_RESET / 4] = 0x01;		/* PHY software reset */
-	__asm__ volatile("dmb sy" ::: "memory");
-	for (unsigned k = 0; k < sizeof ufs_phy_cal / sizeof ufs_phy_cal[0]; k++)
-		phy[ufs_phy_cal[k][0] / 4] = ufs_phy_cal[k][1];
-	phy[UFS_PHY_SW_RESET / 4] = 0x00;		/* release software reset */
-	__asm__ volatile("dmb sy" ::: "memory");
-	gcc[GCC_UFS_PHY_BCR / 4] &= ~1u;		/* reset deassert */
-	udelay(100);
-
-	/* start the SERDES and wait for the PCS (physical coding sublayer) */
-	phy[UFS_PHY_PHY_START / 4] = 0x01;
-	__asm__ volatile("dmb sy" ::: "memory");
-	for (int i = 0; i < 2000 && !(phy[UFS_PHY_PCS_READY / 4] & 1); i++)
-		udelay(500);				/* up to ~1 s */
-	if (!(phy[UFS_PHY_PCS_READY / 4] & 1))
-		return UFS_E_NOTREADY;
-	return 0;
-}
-
-/* Re-run the host-controller enable (Linux ufshcd_hba_execute_hce): toggle HCE
- * off then on. The controller then re-initialises and asserts UICRDY (the
- * transfer/task list ready bits come later, after the lists + run-stop are
- * programmed in ufshcd_make_hba_operational). On SM6375 the ABL does not leave
- * the controller ready for a bare-metal taker. */
-static int ufs_hce_execute(void)
-{
-	ufs_wr(REG_HCE, 0);			/* controller disable */
-	for (int i = 0; i < 1000 && (ufs_rd(REG_HCE) & 1); i++)
-		udelay(10);
-	ufs_wr(REG_HCE, 1);			/* controller enable */
-	udelay(100);				/* the 1->0->1 dance: give it a moment */
-	for (int i = 0; i < 2000 && !(ufs_rd(REG_HCE) & 1); i++)
-		udelay(50);
-	if (!(ufs_rd(REG_HCE) & 1))
-		return UFS_E_NOTREADY;
-	/* wait for UICRDY (the controller's UIC/UniPro layer is up) */
-	for (int i = 0; i < 2000; i++) {
-		if (ufs_rd(REG_HCS) & HCS_UICRDY)
-			return 0;
-		udelay(50);
-	}
-	return UFS_E_NOTREADY;
-}
-
-/* UniPro link startup (Linux ufshcd_dme_link_startup): the UIC command that
- * trains the link so the device's LUNs can finish device-init. */
-static int ufs_dme_link_startup(void)
-{
-	for (int i = 0; i < 1000 && !(ufs_rd(REG_HCS) & HCS_UICRDY); i++)
-		udelay(10);
-	if (!(ufs_rd(REG_HCS) & HCS_UICRDY))
-		return UFS_E_NOTREADY;
-	/* Linux enables the UIC_COMMAND_COMPL interrupt (REG_IE bit 10) before
-	 * dispatching; a polled driver must do the same for the status to latch. */
-	ufs_wr(REG_IE, ufs_rd(REG_IE) | IS_UIC_CMD_COMPL);
-	ufs_wr(REG_IS, IS_UIC_CMD_COMPL);	/* ack any stale completion */
-	ufs_wr(REG_UIC_ARG1, 0);
-	ufs_wr(REG_UIC_ARG2, 0);
-	ufs_wr(REG_UIC_ARG3, 0);
-	ufs_wr(REG_UIC_CMD, UIC_DME_LINK_STARTUP);
-	uint64_t t = ticks();
-	while (!(ufs_rd(REG_IS) & IS_UIC_CMD_COMPL)) {
-		if (ticks() - t > CMD_TIMEOUT)
-			return ufs_last.rc = UFS_E_TIMEOUT;
-		if (idle_fn)
-			idle_fn();
-	}
-	uint32_t result = ufs_rd(REG_UIC_ARG2) & 0xff;
-	ufs_last.target = result;		/* UIC command result (0 = success) */
-	return result == 0 ? 0 : UFS_E_RESP;
-}
-
 int ufs_init(void)
 {
 	uint32_t hcs, hce;
@@ -619,33 +489,9 @@ int ufs_init(void)
 	if (inited)
 		return 0;
 	cap_reg = ufs_rd(REG_CAP);
-	/* SM6375: the Qualcomm QMP UFS PHY must be initialised first (Linux
-	 * phy_init + phy_power_on + calibrate); the UniPro link cannot train
-	 * without it and the device then stays "initializing". */
-	ufs_last.stage = 0;			/* QMP PHY init */
-	int rc = ufs_phy_init();
-	ufs_last.hcs = ufs_rd(REG_HCS);
-	if (rc)
-		return rc;
-	/* Re-run HCE so the controller re-initialises; UICRDY asserts, but DP and
-	 * the list-ready bits only come back after DME_LINK_STARTUP re-trains the
-	 * UniPro link. */
-	ufs_last.stage = 1;			/* HCE re-execute */
-	rc = ufs_hce_execute();
-	ufs_last.hcs = ufs_rd(REG_HCS);
-	if (rc)
-		return rc;
-	if (!(ufs_rd(REG_HCE) & 1))
-		return UFS_E_NOTREADY;
-
-	/* UniPro link startup: train the link; DP + list-ready come back here */
-	ufs_last.stage = 2;			/* DME_LINK_STARTUP */
-	rc = ufs_dme_link_startup();
-	ufs_last.hcs = ufs_rd(REG_HCS);
-	if (rc)
-		return rc;
 	hcs = ufs_rd(REG_HCS);
-	if (!(hcs & HCS_DP))
+	hce = ufs_rd(REG_HCE);
+	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY))
 		return UFS_E_NOTREADY;
 	if (ufs_rd(REG_UTRLDBR))
 		return UFS_E_NOTREADY;		/* ABL left requests outstanding: do not touch */
@@ -673,19 +519,15 @@ int ufs_init(void)
 	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
 	    !(ufs_rd(REG_UTRLRSR) & 1))
 		return UFS_E_NOTREADY;
-	/* UTRLRDY asserts only after the list base + run-stop are programmed */
-	for (int i = 0; i < 2000 && !(ufs_rd(REG_HCS) & HCS_UTRLRDY); i++)
-		udelay(50);
-	if (!(ufs_rd(REG_HCS) & HCS_UTRLRDY))
-		return UFS_E_NOTREADY;
 
+	ufs_last.hcs = ufs_rd(REG_HCS);
 	ufs_last.is = ufs_rd(REG_IS);
 	ufs_last.cfg1 = ufs_rd(REG_VER);	/* VER, a stable register for the diagnostic */
-	ufs_last.hcs = ufs_rd(REG_HCS);
 
 	static const uint8_t tur[6] = { 0x00 };
+	int rc = 0;
 	int fdi = 0;
-	ufs_last.stage = 2;			/* host take-over done */
+	ufs_last.stage = 1;			/* entered init, host take-over done */
 	/* Linux ufshcd_device_init order: NOP OUT verify (UTP layer ready), then
 	 * fDeviceInit (READ the flag; SET it only if not already set; poll until
 	 * cleared), then TEST UNIT READY. */
@@ -696,45 +538,48 @@ int ufs_init(void)
 		for (int d = 0; d < 10; d++)
 			udelay(1000);
 	}
-	ufs_last.stage = 3;			/* NOP OUT loop done */
+	ufs_last.stage = 2;			/* NOP OUT loop done */
 	if (rc)
 		return rc;
 	/* bRefClkFreq: SM6375's UFS reference clock is the 19.2 MHz XO. If ABL left
 	 * it unset (or wrong), device init never completes. READ then WRITE_ATTR. */
 	int rf = -1;
 	rc = query_req(0, UPIU_QOP_READ_ATTR, QRY_ATTR_REF_CLK_FREQ, 0, &rf);
+	ufs_last.refclk = (uint32_t)rf;
 	if (rc == 0 && rf != 0) {		/* 0 = 19.2 MHz */
 		rc = query_req(0, UPIU_QOP_WRITE_ATTR, QRY_ATTR_REF_CLK_FREQ, 0, 0);
 		if (rc)
 			rc = 0;			/* non-fatal: continue */
 	}
-	ufs_last.stage = 4;			/* READ_FLAG issued */
+	ufs_last.stage = 3;			/* READ_FLAG issued */
 	rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);	/* READ_FLAG first */
+	ufs_last.fdi = (uint32_t)fdi;
 	if (rc == 0 && fdi == 0) {
 		rc = query_flag(0, 1, QRY_IDN_FDEVICEINIT, 0);	/* SET_FLAG */
 		if (rc)
 			rc = 0;			/* already-initialising is not fatal */
 	}
-	ufs_last.stage = 5;			/* SET_FLAG done */
-	for (int i = 0; i < 200 && rc == 0; i++) {	/* poll READ_FLAG until cleared */
+	ufs_last.stage = 4;			/* SET_FLAG done */
+	for (int i = 0; i < 300 && rc == 0; i++) {	/* poll READ_FLAG until cleared (30 s) */
 		rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);
+		ufs_last.fdi = (uint32_t)fdi;
 		if (rc || !fdi)
 			break;
 		for (int d = 0; d < 100; d++)	/* ~100 ms */
 			udelay(1000);
 	}
-	ufs_last.stage = 6;			/* fDeviceInit poll done */
-	/* then TEST UNIT READY until the LUN is ready */
-	for (int i = 0; i < 100 && !rc; i++) {
+	ufs_last.stage = 5;			/* fDeviceInit poll done */
+	/* then TEST UNIT READY until the LUN is ready (30 s) */
+	for (int i = 0; i < 300 && !rc; i++) {
 		rc = scsi_sync(0, tur, sizeof tur, 0, 0, 0);
 		if (!rc)
 			break;
 		if (rc != UFS_E_SCSI || ufs_last.sense_key != 2)
 			break;		/* not "not ready": a real error, stop */
-		for (int d = 0; d < 50; d++)	/* ~50 ms */
+		for (int d = 0; d < 100; d++)	/* ~100 ms */
 			udelay(1000);
 	}
-	ufs_last.stage = 7;			/* TEST UNIT READY loop done */
+	ufs_last.stage = 6;			/* TEST UNIT READY loop done */
 	if (rc)
 		return rc;
 	inited = 1;
