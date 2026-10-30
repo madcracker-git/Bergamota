@@ -42,6 +42,8 @@
  * complete device init (ufshcd_complete_dev_init). */
 #define UPIU_TC_QUERY_REQ	0x16
 #define UPIU_TC_QUERY_RSP	0x36
+#define UPIU_TC_NOP_OUT		0x00
+#define UPIU_TC_NOP_IN		0x20
 #define UPIU_QF_STD_READ	0x01
 #define UPIU_QF_STD_WRITE	0x81
 #define UPIU_QOP_READ_FLAG	0x05
@@ -289,6 +291,58 @@ static int scsi_sync(unsigned lun, const uint8_t *cdb, unsigned cdb_len, void *b
 	return rc;
 }
 
+/* NOP OUT handshake (Linux ufshcd_verify_dev_init): confirm the device's UTP
+ * layer is ready before any query. Returns 0 on NOP IN response. */
+static int nop_out(void)
+{
+	struct utrd *d = &utrl[0];
+	struct ucd *c = &ucd[0];
+	uintptr_t ucd_pa = (uintptr_t)c;
+	uint32_t ocs;
+
+	if (x_active())
+		return UFS_E_ARGS;
+
+	for (int k = 0; k < 32; k++)
+		c->cmd[k] = 0;
+	c->cmd[0] = UPIU_TC_NOP_OUT;	/* NOP OUT: 12-byte header, rest zero */
+	for (int k = 0; k < 64; k += 4)
+		w32(&c->resp[k], 0);
+
+	w32(&d->dw0, (1u << 28) | (1u << 24));	/* CT = UFS storage, interrupt */
+	w32(&d->dw1, 0);
+	w32(&d->dw2, 0x0f);
+	w32(&d->dw3, 0);
+	w32(&d->ucdba, (uint32_t)ucd_pa);
+	w32(&d->ucdbau, (uint32_t)(ucd_pa >> 32));
+	w32(&d->resp, (512u / 4) << 16 | (512u / 4));
+	w32(&d->prdt, 0);
+
+	dc_clean(d, sizeof *d);
+	dc_clean(c->cmd, 32);
+	dc_clean(c->resp, 64);
+	ufs_wr(REG_UTRLDBR, 1u);
+	uint64_t t = ticks();
+	while (ufs_rd(REG_UTRLDBR) & 1u) {
+		if (ticks() - t > CMD_TIMEOUT) {
+			slot_abort(0);
+			return ufs_last.rc = UFS_E_TIMEOUT;
+		}
+		if (idle_fn)
+			idle_fn();
+	}
+	dc_inval(d, sizeof *d);
+	dc_inval(c->resp, 64);
+	ocs = r32(&d->dw2) & 0xff;
+	ufs_last.ocs = ocs;
+	ufs_last.upiu = ((const volatile uint8_t *)c->resp)[0];
+	if (ocs)
+		return ufs_last.rc = UFS_E_OCS;
+	if (ufs_last.upiu != UPIU_TC_NOP_IN)
+		return ufs_last.rc = UFS_E_RESP;
+	return ufs_last.rc = 0;
+}
+
 /* UFS query request (dev management). set=1: SET_FLAG, set=0: READ_FLAG; *flag
  * receives the flag value on READ_FLAG. Uses slot 0 (doorbell bit 0). */
 static int query_flag(unsigned lun, int set, uint8_t idn, int *flag)
@@ -397,18 +451,23 @@ int ufs_init(void)
 	static const uint8_t tur[6] = { 0x00 };
 	int rc = 0;
 	int fdi = 0;
-	/* UFS 3.1 (SM6375): the device reports "not ready, initializing command
-	 * required" (sense 02/04 02) because its fDeviceInit flag is already set
-	 * (it is re-initialising after ABL). SET_FLAG is then redundant and the
-	 * device answers GENERAL_FAILURE, so READ the flag first: if it is already
-	 * 1, just poll READ_FLAG until the device clears it (init done), then
-	 * TEST UNIT READY. Only SET_FLAG when it reads 0 (Linux's complete_dev_init
-	 * path). */
+	/* Linux ufshcd_device_init order: NOP OUT verify (UTP layer ready), then
+	 * fDeviceInit (READ the flag; SET it only if not already set; poll until
+	 * cleared), then TEST UNIT READY. */
+	for (int i = 0; i < 4; i++) {		/* NOP OUT until the UTP layer answers */
+		rc = nop_out();
+		if (!rc || rc == UFS_E_TIMEOUT)
+			break;
+		for (int d = 0; d < 10; d++)
+			udelay(1000);
+	}
+	if (rc)
+		return rc;
 	rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);	/* READ_FLAG first */
 	if (rc == 0 && fdi == 0) {
 		rc = query_flag(0, 1, QRY_IDN_FDEVICEINIT, 0);	/* SET_FLAG */
 		if (rc)
-			rc = 0;			/* already-initialising is not fatal: fall through to poll */
+			rc = 0;			/* already-initialising is not fatal */
 	}
 	for (int i = 0; i < 200 && rc == 0; i++) {	/* poll READ_FLAG until cleared */
 		rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);
