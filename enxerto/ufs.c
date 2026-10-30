@@ -548,16 +548,25 @@ int ufs_init(void)
 	if (inited)
 		return 0;
 	cap_reg = ufs_rd(REG_CAP);
-	/* Re-run HCE so the controller fully re-initialises (UTRLRDY/UTMRLRDY/
-	 * UICRDY all assert); on SM6375 the ABL's state is not reusable. */
+	/* Re-run HCE so the controller re-initialises; UICRDY asserts, but DP and
+	 * the list-ready bits only come back after DME_LINK_STARTUP re-trains the
+	 * UniPro link. */
 	ufs_last.stage = 0;			/* HCE re-execute */
 	int rc = ufs_hce_execute();
 	ufs_last.hcs = ufs_rd(REG_HCS);
 	if (rc)
 		return rc;
+	if (!(ufs_rd(REG_HCE) & 1))
+		return UFS_E_NOTREADY;
+
+	/* UniPro link startup: train the link; DP + list-ready come back here */
+	ufs_last.stage = 1;			/* DME_LINK_STARTUP */
+	rc = ufs_dme_link_startup();
+	ufs_last.hcs = ufs_rd(REG_HCS);
+	if (rc)
+		return rc;
 	hcs = ufs_rd(REG_HCS);
-	hce = ufs_rd(REG_HCE);
-	if (!(hce & 1) || !(hcs & HCS_DP))
+	if (!(hcs & HCS_DP))
 		return UFS_E_NOTREADY;
 	if (ufs_rd(REG_UTRLDBR))
 		return UFS_E_NOTREADY;		/* ABL left requests outstanding: do not touch */
@@ -574,12 +583,6 @@ int ufs_init(void)
 	for (unsigned i = 0; i < 32; i++)
 		w32(&utrl[i].dw2, 0x0f);
 	dc_clean(utrl, sizeof utrl);
-
-	/* UniPro link startup: train the link before touching the device */
-	ufs_last.stage = 1;			/* DME_LINK_STARTUP */
-	rc = ufs_dme_link_startup();
-	if (rc)
-		return rc;
 
 	/* take over the transfer request list: stop, point at ours, run */
 	ufs_wr(REG_UTRLRSR, 0);
