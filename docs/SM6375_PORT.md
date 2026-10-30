@@ -279,6 +279,16 @@ the concrete carry/drop/replace list:
   `SecureDTLookupEntry("/sweet-ufs")` → the ADT `reg` I made per-board, so it
   reads `0x04804000` automatically. UFS 2.1 vs 3.1 register differences still
   need a boot test.
+- **✅ UFS reviewed (2026-10-30): fully portable as-is.** The driver is pure
+  JEDEC UFSHCI (standard register offsets `REG_IS 0x20`, `REG_HCS 0x30`, etc.),
+  no SDM845 specifics, gated on `ARM64_BOARD_CONFIG_SWEET` (which SM6375 already
+  builds with). It relies on ABL/Enxerto leaving the UFS link up (true on the
+  Nord, which boots from UFS). So **no `sm6375-*` UFS kernel patch is needed** —
+  only the ADT `/sweet-ufs` reg (done) and a boot test.
+- **✅ `tools/mkpayload.py` is SoC-agnostic** — it reads `dram-base`/`dram-size`
+  from the ADT (already sm6375-correct) to compute `PHYS_BASE`/`MEM_SIZE`, so
+  the kernel→payload→boot-image chain is sm6375-ready via
+  `BOARD=sm6375 enxerto/build.sh payload.bin`.
 
 **Drop (SDM845/beryllium-specific) — write `sm6375-*` equivalents:**
 - Display/scanout: `0096`, `0126`, `0128`–`0129`, `0210`–`0213`, `0215`–`0216`,
