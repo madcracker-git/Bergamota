@@ -492,8 +492,10 @@ static int query_req(unsigned lun, uint8_t opcode, uint8_t idn, uint32_t value, 
 }
 
 /* Re-run the host-controller enable (Linux ufshcd_hba_execute_hce): toggle HCE
- * off then on; the controller then re-initialises and asserts UTRLRDY/UTMRLRDY/
- * UICRDY. On SM6375 the ABL does not leave these ready for a bare-metal taker. */
+ * off then on. The controller then re-initialises and asserts UICRDY (the
+ * transfer/task list ready bits come later, after the lists + run-stop are
+ * programmed in ufshcd_make_hba_operational). On SM6375 the ABL does not leave
+ * the controller ready for a bare-metal taker. */
 static int ufs_hce_execute(void)
 {
 	ufs_wr(REG_HCE, 0);			/* controller disable */
@@ -505,10 +507,9 @@ static int ufs_hce_execute(void)
 		udelay(50);
 	if (!(ufs_rd(REG_HCE) & 1))
 		return UFS_E_NOTREADY;
-	/* wait for the ready bits (UTRLRDY + UTMRLRDY + UICRDY) */
+	/* wait for UICRDY (the controller's UIC/UniPro layer is up) */
 	for (int i = 0; i < 2000; i++) {
-		uint32_t h = ufs_rd(REG_HCS);
-		if ((h & (HCS_UTRLRDY | HCS_UTMRLRDY | HCS_UICRDY)) == (HCS_UTRLRDY | HCS_UTMRLRDY | HCS_UICRDY))
+		if (ufs_rd(REG_HCS) & HCS_UICRDY)
 			return 0;
 		udelay(50);
 	}
@@ -590,9 +591,15 @@ int ufs_init(void)
 	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
 	    !(ufs_rd(REG_UTRLRSR) & 1))
 		return UFS_E_NOTREADY;
+	/* UTRLRDY asserts only after the list base + run-stop are programmed */
+	for (int i = 0; i < 2000 && !(ufs_rd(REG_HCS) & HCS_UTRLRDY); i++)
+		udelay(50);
+	if (!(ufs_rd(REG_HCS) & HCS_UTRLRDY))
+		return UFS_E_NOTREADY;
 
 	ufs_last.is = ufs_rd(REG_IS);
 	ufs_last.cfg1 = ufs_rd(REG_VER);	/* VER, a stable register for the diagnostic */
+	ufs_last.hcs = ufs_rd(REG_HCS);
 
 	static const uint8_t tur[6] = { 0x00 };
 	int fdi = 0;
