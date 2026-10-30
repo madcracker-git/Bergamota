@@ -147,6 +147,7 @@ static struct ucd ucd[NQ] __attribute__((aligned(128)));
 static uint8_t pbuf[64] __attribute__((aligned(64)));
 
 static int inited, nq, qd = NQ;	/* nq: slots available, qd: commands allowed in flight (oem ufsq) */
+int ufs_gear = 1;			/* 0 = leave the link at PWM-G1 (diagnostic) */
 static uint32_t cap_reg;
 static void (*idle_fn)(void);
 
@@ -1006,9 +1007,11 @@ int ufs_init(void)
 	/* gear the link up to HS-G1 FAST mode: the post-startup default is PWM-G1
 	 * (~0.4 MB/s). Without this the iOS root flash takes ~11 hours. */
 	ufs_last.stage = 10;			/* HS gear-up */
-	rc = ufs_gear_up();
-	if (rc)
-		return rc;
+	if (ufs_gear) {
+		rc = ufs_gear_up();
+		if (rc)
+			return rc;
+	}
 	/* Leave the host quiet for the kernel: disable interrupts and ack everything
 	 * pending, so the UFS interrupt line is deasserted and no stray SPI reaches
 	 * the kernel's GIC (which has no UFS handler until sweet_ufs.c runs). */

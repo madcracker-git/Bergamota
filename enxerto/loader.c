@@ -367,8 +367,10 @@ const char *loader_boot_payload(uintptr_t rd_start, uintptr_t rd_end, int verify
 	/* Bring the UFS host up (full Qualcomm sequence + HS gear-up) and leave it
 	 * running, so the kernel's sweet_ufs.c finds it ready to take over. SM6375's
 	 * ABL does NOT leave UFS up for a bare-metal taker (HCE clear, host error).
-	 * Payload cmdline flag sweetufs=0 skips it (diagnostic isolation). */
+	 * Payload cmdline flags (diagnostic isolation): sweetufs=0 skips the whole
+	 * bring-up; sweetgear=0 skips only the HS gear-up. */
 	if (!str_find((const char *)h + 0x48, "sweetufs=0")) {
+		ufs_gear = str_find((const char *)h + 0x48, "sweetgear=0") ? 0 : 1;
 		int urc = ufs_init();
 		con_hex2("UFS", "init=", (uint32_t)urc, "stage=", ufs_last.stage);
 	}
