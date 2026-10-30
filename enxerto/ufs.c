@@ -32,9 +32,18 @@
 #define REG_UTRLDBR	0x58
 #define REG_UTRLCLR	0x5c
 #define REG_UTRLRSR	0x60
+#define REG_UIC_CMD	0x90
+#define REG_UIC_ARG1	0x94
+#define REG_UIC_ARG2	0x98
+#define REG_UIC_ARG3	0x9c
 
 #define HCS_DP		(1u << 0)
 #define HCS_UTRLRDY	(1u << 1)
+#define HCS_UTMRLRDY	(1u << 2)
+#define HCS_UICRDY	(1u << 3)
+
+#define UIC_DME_LINK_STARTUP	0x16
+#define IS_UIC_CMD_COMPL	(1u << 10)
 
 #define CAP_64AS	(1u << 24)
 
@@ -482,6 +491,55 @@ static int query_req(unsigned lun, uint8_t opcode, uint8_t idn, uint32_t value, 
 	return ufs_last.rc = 0;
 }
 
+/* Re-run the host-controller enable (Linux ufshcd_hba_execute_hce): toggle HCE
+ * off then on; the controller then re-initialises and asserts UTRLRDY/UTMRLRDY/
+ * UICRDY. On SM6375 the ABL does not leave these ready for a bare-metal taker. */
+static int ufs_hce_execute(void)
+{
+	ufs_wr(REG_HCE, 0);			/* controller disable */
+	for (int i = 0; i < 1000 && (ufs_rd(REG_HCE) & 1); i++)
+		udelay(10);
+	ufs_wr(REG_HCE, 1);			/* controller enable */
+	udelay(100);				/* the 1->0->1 dance: give it a moment */
+	for (int i = 0; i < 2000 && !(ufs_rd(REG_HCE) & 1); i++)
+		udelay(50);
+	if (!(ufs_rd(REG_HCE) & 1))
+		return UFS_E_NOTREADY;
+	/* wait for the ready bits (UTRLRDY + UTMRLRDY + UICRDY) */
+	for (int i = 0; i < 2000; i++) {
+		uint32_t h = ufs_rd(REG_HCS);
+		if ((h & (HCS_UTRLRDY | HCS_UTMRLRDY | HCS_UICRDY)) == (HCS_UTRLRDY | HCS_UTMRLRDY | HCS_UICRDY))
+			return 0;
+		udelay(50);
+	}
+	return UFS_E_NOTREADY;
+}
+
+/* UniPro link startup (Linux ufshcd_dme_link_startup): the UIC command that
+ * trains the link so the device's LUNs can finish device-init. */
+static int ufs_dme_link_startup(void)
+{
+	for (int i = 0; i < 1000 && !(ufs_rd(REG_HCS) & HCS_UICRDY); i++)
+		udelay(10);
+	if (!(ufs_rd(REG_HCS) & HCS_UICRDY))
+		return UFS_E_NOTREADY;
+	ufs_wr(REG_IS, IS_UIC_CMD_COMPL);	/* ack any stale completion */
+	ufs_wr(REG_UIC_ARG1, 0);
+	ufs_wr(REG_UIC_ARG2, 0);
+	ufs_wr(REG_UIC_ARG3, 0);
+	ufs_wr(REG_UIC_CMD, UIC_DME_LINK_STARTUP);
+	uint64_t t = ticks();
+	while (!(ufs_rd(REG_IS) & IS_UIC_CMD_COMPL)) {
+		if (ticks() - t > CMD_TIMEOUT)
+			return ufs_last.rc = UFS_E_TIMEOUT;
+		if (idle_fn)
+			idle_fn();
+	}
+	uint32_t result = ufs_rd(REG_UIC_ARG2) & 0xff;
+	ufs_last.target = result;		/* UIC command result (0 = success) */
+	return result == 0 ? 0 : UFS_E_RESP;
+}
+
 int ufs_init(void)
 {
 	uint32_t hcs, hce;
@@ -489,9 +547,16 @@ int ufs_init(void)
 	if (inited)
 		return 0;
 	cap_reg = ufs_rd(REG_CAP);
+	/* Re-run HCE so the controller fully re-initialises (UTRLRDY/UTMRLRDY/
+	 * UICRDY all assert); on SM6375 the ABL's state is not reusable. */
+	ufs_last.stage = 0;			/* HCE re-execute */
+	int rc = ufs_hce_execute();
+	ufs_last.hcs = ufs_rd(REG_HCS);
+	if (rc)
+		return rc;
 	hcs = ufs_rd(REG_HCS);
 	hce = ufs_rd(REG_HCE);
-	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY))
+	if (!(hce & 1) || !(hcs & HCS_DP))
 		return UFS_E_NOTREADY;
 	if (ufs_rd(REG_UTRLDBR))
 		return UFS_E_NOTREADY;		/* ABL left requests outstanding: do not touch */
@@ -509,6 +574,12 @@ int ufs_init(void)
 		w32(&utrl[i].dw2, 0x0f);
 	dc_clean(utrl, sizeof utrl);
 
+	/* UniPro link startup: train the link before touching the device */
+	ufs_last.stage = 1;			/* DME_LINK_STARTUP */
+	rc = ufs_dme_link_startup();
+	if (rc)
+		return rc;
+
 	/* take over the transfer request list: stop, point at ours, run */
 	ufs_wr(REG_UTRLRSR, 0);
 	uintptr_t list = (uintptr_t)utrl;
@@ -520,14 +591,12 @@ int ufs_init(void)
 	    !(ufs_rd(REG_UTRLRSR) & 1))
 		return UFS_E_NOTREADY;
 
-	ufs_last.hcs = ufs_rd(REG_HCS);
 	ufs_last.is = ufs_rd(REG_IS);
 	ufs_last.cfg1 = ufs_rd(REG_VER);	/* VER, a stable register for the diagnostic */
 
 	static const uint8_t tur[6] = { 0x00 };
-	int rc = 0;
 	int fdi = 0;
-	ufs_last.stage = 1;			/* entered init, host take-over done */
+	ufs_last.stage = 2;			/* host take-over done */
 	/* Linux ufshcd_device_init order: NOP OUT verify (UTP layer ready), then
 	 * fDeviceInit (READ the flag; SET it only if not already set; poll until
 	 * cleared), then TEST UNIT READY. */
@@ -538,7 +607,7 @@ int ufs_init(void)
 		for (int d = 0; d < 10; d++)
 			udelay(1000);
 	}
-	ufs_last.stage = 2;			/* NOP OUT loop done */
+	ufs_last.stage = 3;			/* NOP OUT loop done */
 	if (rc)
 		return rc;
 	/* bRefClkFreq: SM6375's UFS reference clock is the 19.2 MHz XO. If ABL left
@@ -550,14 +619,14 @@ int ufs_init(void)
 		if (rc)
 			rc = 0;			/* non-fatal: continue */
 	}
-	ufs_last.stage = 3;			/* READ_FLAG issued */
+	ufs_last.stage = 4;			/* READ_FLAG issued */
 	rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);	/* READ_FLAG first */
 	if (rc == 0 && fdi == 0) {
 		rc = query_flag(0, 1, QRY_IDN_FDEVICEINIT, 0);	/* SET_FLAG */
 		if (rc)
 			rc = 0;			/* already-initialising is not fatal */
 	}
-	ufs_last.stage = 4;			/* SET_FLAG done */
+	ufs_last.stage = 5;			/* SET_FLAG done */
 	for (int i = 0; i < 200 && rc == 0; i++) {	/* poll READ_FLAG until cleared */
 		rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);
 		if (rc || !fdi)
@@ -565,7 +634,7 @@ int ufs_init(void)
 		for (int d = 0; d < 100; d++)	/* ~100 ms */
 			udelay(1000);
 	}
-	ufs_last.stage = 5;			/* fDeviceInit poll done */
+	ufs_last.stage = 6;			/* fDeviceInit poll done */
 	/* then TEST UNIT READY until the LUN is ready */
 	for (int i = 0; i < 100 && !rc; i++) {
 		rc = scsi_sync(0, tur, sizeof tur, 0, 0, 0);
@@ -576,7 +645,7 @@ int ufs_init(void)
 		for (int d = 0; d < 50; d++)	/* ~50 ms */
 			udelay(1000);
 	}
-	ufs_last.stage = 6;			/* TEST UNIT READY loop done */
+	ufs_last.stage = 7;			/* TEST UNIT READY loop done */
 	if (rc)
 		return rc;
 	inited = 1;
