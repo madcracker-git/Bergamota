@@ -163,19 +163,11 @@ static const char *fb_var(struct fb *fb, unsigned i, const char **name, char *bu
 		return buf;
 	}
 	case 16: {
-		/* bootloader-only: the last UFS error, raw (ocs, response UPIU type, SCSI status) */
+		/* bootloader-only: compact UFS diagnostic (<= 60 chars for FB_PKT) */
 		*name = "bergamota-ufs";
 		char *p = buf;
 		*p++ = 'r'; *p++ = 'c'; *p++ = '=';
 		p += fb_hex(p, (uint32_t)ufs_last.rc, 1);
-		*p++ = ' '; *p++ = 'o'; *p++ = 'c'; *p++ = 's'; *p++ = '=';
-		p += fb_hex(p, ufs_last.ocs, 2);
-		*p++ = ' '; *p++ = 'u'; *p++ = 'p'; *p++ = 'i'; *p++ = 'u'; *p++ = '=';
-		p += fb_hex(p, ufs_last.upiu, 2);
-		*p++ = ' '; *p++ = 's'; *p++ = 't'; *p++ = '=';
-		p += fb_hex(p, ufs_last.status, 2);
-		*p++ = ' '; *p++ = 't'; *p++ = 'g'; *p++ = '=';
-		p += fb_hex(p, ufs_last.target, 2);
 		*p++ = ' '; *p++ = 'k'; *p++ = '=';
 		p += fb_hex(p, ufs_last.sense_key, 2);
 		*p++ = ' '; *p++ = 'a'; *p++ = '=';
@@ -183,12 +175,6 @@ static const char *fb_var(struct fb *fb, unsigned i, const char **name, char *bu
 		p += fb_hex(p, ufs_last.ascq, 2);
 		*p++ = ' '; *p++ = 'g'; *p++ = '=';
 		p += fb_hex(p, ufs_last.stage, 2);
-		*p++ = ' '; *p++ = 'h'; *p++ = '=';
-		p += fb_hex(p, ufs_last.hcs, 2);
-		*p++ = ' '; *p++ = 'i'; *p++ = '=';
-		p += fb_hex(p, ufs_last.is, 2);
-		*p++ = ' '; *p++ = 'c'; *p++ = '=';
-		p += fb_hex(p, ufs_last.cfg1, 2);
 		*p++ = ' '; *p++ = 'r'; *p++ = 'f'; *p++ = '=';
 		p += fb_hex(p, ufs_last.refclk, 2);
 		*p++ = ' '; *p++ = 'f'; *p++ = 'd'; *p++ = '=';
