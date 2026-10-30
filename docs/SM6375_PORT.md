@@ -495,6 +495,58 @@ extract the serdes/tx/rx/pcs init tables, and port them into `enxerto/ufs.c`
 as a PHY-init step that runs before HCE/DME_LINK_STARTUP. Everything else in the
 UFS path is already implemented and stage-verified.
 
+### ✅✅ UFS FLASH PATH WORKS (2026-10-31 01:18) — the blocker is cleared
+
+The full Qualcomm UFS bring-up landed and the flash path is now live. The
+missing piece the whole time was the **reset ordering**: the vendor flow stops
+the host controller (HCE=0) *before* the PHY/core reset. The earlier attempts
+reset the PHY under a live controller, which faulted the SoC (watchdog reboot,
+"Too many links" on USB).
+
+Working sequence, ported faithfully from `ufs-qcom.c` + `ufshcd.c` (all in
+`enxerto/ufs.c`, committed to `sm6375-port`):
+
+1. **HCE stop** — `REG_HCE = 0`, wait until the controller reports off.
+2. **`ufs_phy_gdsc`** (GCC `0x45004`) power on — clear SW_COLLAPSE, wait PWR_ON.
+3. **core reset** — `GCC_UFS_PHY_BCR` (`0x45000`) assert 200 µs, deassert, 1 ms.
+4. **UFS clocks** — RCG sources (axi 100 MHz, unipro 75 MHz, ice 150 MHz,
+   aux 19.2 MHz) + 9 branch clocks (AHB/AXI/unipro/ice/aux/tx-sym/rx-sym/
+   sys-noc/ref). A clock-failure bitmap is reported in `bergamota-ufs2.c=`.
+5. **PHY soft-reset** — `REG_UFS_CFG1` (`UFS_BASE+0xDC`) bit 1 + PHY `SW_RESET`
+   (`0xc08`), then the 79-entry `phy_cal_table_rate_A_no_g4` (vendor
+   `phy-qcom-ufs-qmp-v4-yupik`, non-G4 1-lane) written under reset.
+6. **SERDES start** — `UFS_PHY_START` (`0xc00`) = 1, poll `PCS_READY` (`0xd80`).
+7. **HCE start** — `REG_HCE = 1`, wait 1→0→1 completion, then UICRDY.
+8. **DME_LINK_STARTUP** (`0x16`) with UIC_COMMAND_COMPL interrupt enable.
+9. **transfer list + UTRLRDY**, then NOP OUT → `bRefClkFreq` → `fDeviceInit` →
+   TEST UNIT READY.
+
+Result on hardware (`oem ufsinit` → `OKAY`, then `oem gpt`):
+
+```
+bergamota-ufs : rc=0 k=00 a=0000 g=09 rf=00 fd=00   # g=09 = init complete
+bergamota-ufs2: h=0f i=404 c=300 t=00                # HCS=0x0f (DP|UTRLRDY|UTMRLRDY|UICRDY)
+lun 0 gpt ok 119444 MiB    # the 116 GB userdata LUN
+lun 1 gpt ok 8 MiB
+lun 2 gpt ok 8 MiB
+lun 3 gpt ok 32 MiB
+lun 4 gpt ok 1976 MiB
+lun 5 gpt ok 556 MiB
+```
+
+All six LUNs answer READ CAPACITY and parse a valid GPT. `h=0x0f` means Device
+Present + both list-ready bits + UIC ready. **The iOS root image can now be
+flashed to `userdata`.**
+
+**Known follow-up (next session):** the allowlist scan (`storage.c`) reports
+`lun N gpt ok` but found **no `userdata`/`boot`/`logo` partition names** in any
+GPT, and a second `oem gpt` (re-scan) hangs the device. The Nord is virtual
+A/B (`boot_a`/`boot_b`/`userdata`), so `userdata` should exist — the GPT entry
+name decode or the LUN→partition map needs checking against the real
+partition table (dump the actual UTF-16 GPT names, or read the device fstab).
+Also the re-scan hang (likely a DMA/cache or RPMB-LUN read issue) needs fixing
+before `fastboot flash userdata`.
+
 1. Build the iOS 18.7.8 root exactly as today (`tools/renegade/renegade
    fetch-tools fetch root`). This step is SoC-independent.
 2. The `mkboot-full.sh` path keys off `BOARD=beryllium`; add a `BOARD=sm6375`
