@@ -24,6 +24,7 @@
 
 struct ufs_last {
 	uint32_t ocs, status, sense_key, asc, ascq;
+	uint32_t upiu;		/* response UPIU type byte (0x21 = RESPONSE) */
 	int rc;
 };
 extern struct ufs_last ufs_last;

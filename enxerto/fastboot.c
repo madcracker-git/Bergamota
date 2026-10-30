@@ -6,6 +6,10 @@
 #include "fastboot.h"
 #include "sparse.h"
 
+#ifdef FB_INITRD_DIAG
+#include "ufs.h"	/* bergamota-ufs getvar: the last UFS error */
+#endif
+
 #ifndef FB_PRODUCT
 #define FB_PRODUCT	"beryllium"
 #endif
@@ -103,7 +107,7 @@ static void fb_drop_session(struct fb *fb)
  * relocations, and the shim image runs wherever ABL put it (build.sh rejects ABS64).
  */
 #ifdef FB_INITRD_DIAG
-#define FB_NVARS 16
+#define FB_NVARS 17
 #else
 #define FB_NVARS 15
 #endif
@@ -155,6 +159,21 @@ static const char *fb_var(struct fb *fb, unsigned i, const char **name, char *bu
 		} else {
 			p += fb_hex(p, (uint64_t)loader_magic_off, 1);
 		}
+		*p = 0;
+		return buf;
+	}
+	case 16: {
+		/* bootloader-only: the last UFS error, raw (ocs, response UPIU type, SCSI status) */
+		*name = "bergamota-ufs";
+		char *p = buf;
+		*p++ = 'r'; *p++ = 'c'; *p++ = '=';
+		p += fb_hex(p, (uint32_t)ufs_last.rc, 1);
+		*p++ = ' '; *p++ = 'o'; *p++ = 'c'; *p++ = 's'; *p++ = '=';
+		p += fb_hex(p, ufs_last.ocs, 2);
+		*p++ = ' '; *p++ = 'u'; *p++ = 'p'; *p++ = 'i'; *p++ = 'u'; *p++ = '=';
+		p += fb_hex(p, ufs_last.upiu, 2);
+		*p++ = ' '; *p++ = 's'; *p++ = 't'; *p++ = '=';
+		p += fb_hex(p, ufs_last.status, 2);
 		*p = 0;
 		return buf;
 	}

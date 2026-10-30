@@ -446,11 +446,7 @@ void enxerto_main(uint64_t dtb)
 
 	/* Then probe the internal UFS while the MMU is still off. */
 	stage = "ufs";
-#ifndef BOARD_SM6375
 	test_ufs();
-#else
-	con_str("UFS", "not ported to SM6375 yet (docs/SM6375_PORT.md M1)");
-#endif
 	con_skip();
 	con_str("UFS", "probe done, GIC/timer test in 15 s");
 	delay_ms(15000);

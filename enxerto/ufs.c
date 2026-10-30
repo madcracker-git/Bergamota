@@ -202,6 +202,7 @@ static int cmd_result(unsigned i)
 	st = ((const volatile uint8_t *)c->resp)[7];
 	ufs_last.ocs = ocs;
 	ufs_last.status = st;
+	ufs_last.upiu = ((const volatile uint8_t *)c->resp)[0];
 	ufs_last.sense_key = ufs_last.asc = ufs_last.ascq = 0;
 	if (ocs)
 		return ufs_last.rc = UFS_E_OCS;
