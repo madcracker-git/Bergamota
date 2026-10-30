@@ -27,6 +27,8 @@
 #define REG_IS		0x20
 #define REG_HCS		0x30
 #define REG_HCE		0x34
+#define REG_UFS_CFG1	0xDC	/* Qualcomm vendor: device ref clock control (ufs-qcom.c) */
+#define UFS_CFG1_DEV_REF_CLK_EN (1u << 26)
 #define REG_UTRLBA	0x50
 #define REG_UTRLBAU	0x54
 #define REG_UTRLDBR	0x58
@@ -519,6 +521,15 @@ int ufs_init(void)
 	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
 	    !(ufs_rd(REG_UTRLRSR) & 1))
 		return UFS_E_NOTREADY;
+
+	/* Qualcomm device reference clock: the UFS 3.1 device needs it running to
+	 * complete device-init (Linux ufs_qcom_dev_ref_clk_ctrl, REG_UFS_CFG1 bit 26).
+	 * ABL may gate it after boot; enable it before the init handshake. */
+	ufs_wr(REG_UFS_CFG1, ufs_rd(REG_UFS_CFG1) | UFS_CFG1_DEV_REF_CLK_EN);
+	ufs_rd(REG_UFS_CFG1);	/* force the write through */
+	ufs_last.hcs = ufs_rd(REG_HCS);
+	ufs_last.is = ufs_rd(REG_IS);
+	ufs_last.cfg1 = ufs_rd(REG_UFS_CFG1);
 
 	static const uint8_t tur[6] = { 0x00 };
 	int rc = 0;
