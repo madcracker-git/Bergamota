@@ -306,8 +306,19 @@ int ufs_init(void)
 		return UFS_E_NOTREADY;
 
 	static const uint8_t tur[6] = { 0x00 };
+	static const uint8_t ssu[6] = { 0x1b, 0, 0, 0, 0x01, 0 };	/* START STOP UNIT, START bit (LUN on) */
 	int rc = 0;
-	for (int i = 0; i < 4; i++) {		/* the first command may report a unit attention */
+	/* UFS 3.1 (SM6375) leaves the LUN in "initializing command required"
+	 * (sense 02/04 02) after ABL: START STOP UNIT brings it online. UFS 2.1
+	 * (SDM845) is already ready, where this returns "already started" (harmless). */
+	for (int i = 0; i < 4; i++) {
+		rc = scsi_sync(0, ssu, sizeof ssu, 0, 0, 0);
+		if (!rc)
+			break;
+		if (!(rc == UFS_E_SCSI && ufs_last.sense_key == 2))
+			break;		/* NOT READY: retry; anything else, stop */
+	}
+	for (int i = 0; i < 4 && !rc; i++) {	/* then TEST UNIT READY until clean */
 		rc = scsi_sync(0, tur, sizeof tur, 0, 0, 0);
 		if (!rc)
 			break;
