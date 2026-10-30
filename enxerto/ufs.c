@@ -36,6 +36,7 @@
 #define REG_UIC_ARG1	0x94
 #define REG_UIC_ARG2	0x98
 #define REG_UIC_ARG3	0x9c
+#define REG_IE		0x24
 
 #define HCS_DP		(1u << 0)
 #define HCS_UTRLRDY	(1u << 1)
@@ -524,6 +525,9 @@ static int ufs_dme_link_startup(void)
 		udelay(10);
 	if (!(ufs_rd(REG_HCS) & HCS_UICRDY))
 		return UFS_E_NOTREADY;
+	/* Linux enables the UIC_COMMAND_COMPL interrupt (REG_IE bit 10) before
+	 * dispatching; a polled driver must do the same for the status to latch. */
+	ufs_wr(REG_IE, ufs_rd(REG_IE) | IS_UIC_CMD_COMPL);
 	ufs_wr(REG_IS, IS_UIC_CMD_COMPL);	/* ack any stale completion */
 	ufs_wr(REG_UIC_ARG1, 0);
 	ufs_wr(REG_UIC_ARG2, 0);
