@@ -196,6 +196,11 @@ static uint32_t le32p(const uint8_t *p)
 	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
+static uint64_t le64p(const uint8_t *p)
+{
+	return (uint64_t)le32p(p) | (uint64_t)le32p(p + 4) << 32;
+}
+
 /* tiny string builder, no libc */
 struct sb {
 	char *d;
@@ -737,6 +742,7 @@ static void p_set_verify(void *ctx, int on)
 static void p_gpt_info(void *ctx, struct fb *fb)
 {
 	static char line[64];
+	static uint8_t ents[128 * 128] __attribute__((aligned(64)));
 	const char *why = st_ensure();
 
 	(void)ctx;
@@ -744,7 +750,6 @@ static void p_gpt_info(void *ctx, struct fb *fb)
 		fb_info(fb, why);
 		return;
 	}
-	stor_scan(&g_stor);	/* oem gpt re-reads the GPTs */
 	for (unsigned l = 0; l < 8; l++) {
 		struct sb b = { line, 0, sizeof line };
 		if (!g_stor.lun_info[l].blocks)
@@ -765,6 +770,48 @@ static void p_gpt_info(void *ctx, struct fb *fb)
 		if (p->dup)
 			sb_str(&b, " AMBIGUOUS");
 		fb_info(fb, line);
+	}
+
+	/* Raw GPT entry dump of LUN 0 (diagnostic): every UTF-16 name, first LBA and
+	 * size, bypassing the allowlist so the real partition names are visible. */
+	{
+		uint8_t hdr[STOR_BLK] __attribute__((aligned(64)));
+		if (!ufs_read(0, 1, 1, hdr)) {
+			static const char sig[8] = { 'E', 'F', 'I', ' ', 'P', 'A', 'R', 'T' };
+			int ok = 1;
+			for (int i = 0; i < 8; i++)
+				if (hdr[i] != (uint8_t)sig[i]) { ok = 0; break; }
+			if (ok) {
+				uint32_t nent = le32p(hdr + 80), esz = le32p(hdr + 84);
+				uint64_t elba = le64p(hdr + 72);
+				if (esz == 128 && nent && nent <= 128) {
+					uint32_t blocks = (nent * 128 + STOR_BLK - 1) / STOR_BLK;
+					if (!ufs_read(0, elba, blocks, ents)) {
+						fb_info(fb, "--- raw lun0 entries ---");
+						for (uint32_t i = 0; i < nent; i++) {
+							const uint8_t *e = ents + i * 128;
+							uint64_t first = le64p(e + 32), last = le64p(e + 40);
+							if (!first)
+								continue;
+							char name[37];
+							int n = 0;
+							for (int c = 0; c < 36; c++) {
+								uint8_t lo = e[56 + 2 * c], hi = e[57 + 2 * c];
+								if (!lo && !hi)
+									break;
+								name[n++] = (hi || lo < 32 || lo >= 127) ? '?' : (char)lo;
+							}
+							name[n] = 0;
+							struct sb b = { line, 0, sizeof line };
+							line[0] = 0;
+							sb_str(&b, name); sb_str(&b, " lba "); sb_u(&b, first);
+							sb_str(&b, " "); sb_u(&b, (last - first + 1) >> 8); sb_str(&b, " MiB");
+							fb_info(fb, line);
+						}
+					}
+				}
+			}
+		}
 	}
 }
 
