@@ -20,6 +20,7 @@
 #include "inflate.h"
 #include "loader.h"
 #include "mmu.h"
+#include "ufs.h"
 
 #define BOOT_LINE_LENGTH	608
 #define PAGE_16K		0x4000UL
@@ -308,6 +309,15 @@ const char *loader_boot_payload(uintptr_t rd_start, uintptr_t rd_end, int verify
 	con_hex("JUMP", entry_pa);
 	bootui_progress(1000, "STARTING IOS");
 	enxerto_charger_handoff();	/* the kernel's sweetcharger=2 finds the charger registers as ABL left them */
+#ifdef BOARD_SM6375
+	/* Bring the UFS host up (full Qualcomm sequence + HS gear-up) and leave it
+	 * running, so the kernel's sweet_ufs.c finds it ready to take over. SM6375's
+	 * ABL does NOT leave UFS up for a bare-metal taker (HCE clear, host error). */
+	{
+		int urc = ufs_init();
+		con_hex2("UFS", "init=", (uint32_t)urc, "stage=", ufs_last.stage);
+	}
+#endif
 	con_str("XNU", "jumping (fbcon clears screen)");
 	bootui_handoff();
 
