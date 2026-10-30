@@ -547,6 +547,14 @@ static void st_cached(void *ctx, int on, const void *lo, const void *hi)
 		mmu_off_ret(win_r);
 }
 
+static void st_line(void *ctx, const char *s)
+{
+	(void)ctx;
+	if (!g_fb)
+		return;
+	fb_info(g_fb, s);
+}
+
 static void st_progress(void *ctx, uint64_t bytes)
 {
 	(void)ctx;
@@ -579,6 +587,7 @@ static const char *st_ensure(void)
 		g_stor.ctx = 0;
 		g_stor.scratch = (uint8_t *)scratch_base;
 		g_stor.cached = st_cached;
+		g_stor.line = st_line;
 		g_stor.progress = st_progress;
 		ufs_set_idle(ui_tick);
 		/* stale dirty lines ABL left in the scratch area must never be evicted over our data */
@@ -742,7 +751,6 @@ static void p_set_verify(void *ctx, int on)
 static void p_gpt_info(void *ctx, struct fb *fb)
 {
 	static char line[64];
-	static uint8_t ents[128 * 128] __attribute__((aligned(64)));
 	const char *why = st_ensure();
 
 	(void)ctx;
@@ -770,48 +778,6 @@ static void p_gpt_info(void *ctx, struct fb *fb)
 		if (p->dup)
 			sb_str(&b, " AMBIGUOUS");
 		fb_info(fb, line);
-	}
-
-	/* Raw GPT entry dump of LUN 0 (diagnostic): every UTF-16 name, first LBA and
-	 * size, bypassing the allowlist so the real partition names are visible. */
-	{
-		static uint8_t hdr[STOR_BLK] __attribute__((aligned(64)));
-		if (!ufs_read(0, 1, 1, hdr)) {
-			static const char sig[8] = { 'E', 'F', 'I', ' ', 'P', 'A', 'R', 'T' };
-			int ok = 1;
-			for (int i = 0; i < 8; i++)
-				if (hdr[i] != (uint8_t)sig[i]) { ok = 0; break; }
-			if (ok) {
-				uint32_t nent = le32p(hdr + 80), esz = le32p(hdr + 84);
-				uint64_t elba = le64p(hdr + 72);
-				if (esz == 128 && nent && nent <= 128) {
-					uint32_t blocks = (nent * 128 + STOR_BLK - 1) / STOR_BLK;
-					if (!ufs_read(0, elba, blocks, ents)) {
-						fb_info(fb, "--- raw lun0 entries ---");
-						for (uint32_t i = 0; i < nent; i++) {
-							const uint8_t *e = ents + i * 128;
-							uint64_t first = le64p(e + 32), last = le64p(e + 40);
-							if (!first)
-								continue;
-							char name[37];
-							int n = 0;
-							for (int c = 0; c < 36; c++) {
-								uint8_t lo = e[56 + 2 * c], hi = e[57 + 2 * c];
-								if (!lo && !hi)
-									break;
-								name[n++] = (hi || lo < 32 || lo >= 127) ? '?' : (char)lo;
-							}
-							name[n] = 0;
-							struct sb b = { line, 0, sizeof line };
-							line[0] = 0;
-							sb_str(&b, name); sb_str(&b, " lba "); sb_u(&b, first);
-							sb_str(&b, " "); sb_u(&b, (last - first + 1) >> 8); sb_str(&b, " MiB");
-							fb_info(fb, line);
-						}
-					}
-				}
-			}
-		}
 	}
 }
 

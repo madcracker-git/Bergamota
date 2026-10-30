@@ -47,6 +47,8 @@ struct stor {
 	 * where the CPU touches data).
 	 */
 	void (*cached)(void *ctx, int on, const void *lo, const void *hi);
+	/* one diagnostic text line (GPT entry names etc.); may be NULL */
+	void (*line)(void *ctx, const char *s);
 	/* bytes processed since the last call (progress, UI refresh); may be NULL */
 	void (*progress)(void *ctx, uint64_t bytes);
 	int verify;		/* read back and compare everything written */
