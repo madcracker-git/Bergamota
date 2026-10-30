@@ -1,0 +1,17 @@
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index 427cd8b..f3bb297 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -2344,7 +2344,11 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	mem_segments = (mem_size + 0x0FFFFFFF) >> 28;
+ 
+ 	va_l1 = dynamic_memory_begin;
+-	va_l1_end = va_l1 + ((2 + (mem_segments * 10)) << 20);
++	/* +64 MiB fixed margin (patch 0254): the framebuffer back-buffers alone
++	 * are ~36 MiB (12 MiB panel + 3 canvases), plus GIC/PMIC/USB/UFS maps.
++	 * On the SM6375 low bank (432 MiB, mem_segments=2) the stock
++	 * (2 + segs*10) = 22 MiB budget ran out mid-surface-map (pmap_map_bd). */
++	va_l1_end = va_l1 + ((2 + (mem_segments * 10) + 64) << 20);
+ 	va_l1_end += round_page(args->Video.v_height * args->Video.v_rowBytes);
+ 	va_l1_end = (va_l1_end + 0x00000000007FFFFFULL) & 0xFFFFFFFFFF800000ULL;
+ 

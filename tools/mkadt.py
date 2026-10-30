@@ -85,13 +85,11 @@ BOARDS = {
         gicd=(0xf200000, 0x10000), gicr=(0xf240000, 0x100000),
         # ufshc@4804000 (UFS 3.1)
         ufs=(0x04804000, 0x3000),
-        # Kernel in the clean HIGH bank (0x180000000 + 4 GiB). The low bank's
-        # only clean window (0xa0000000..0xbbb00000, 432 MiB) is too small for
-        # xnu's early-I/O VA budget (mem_segments=2 -> ~32 MiB, which the 12 MiB
-        # framebuffer map overruns -> pmap_map_bd panic). The high bank gives
-        # mem_segments=16 -> ~162 MiB budget, as beryllium's highmem does. The
-        # framebuffer stays in the low bank (0x85200000) and is mapped apart.
-        mem=(0x180000000, 0x100000000),
+        # Kernel in the low bank's clean window 0xa0000000..0xbb000000 (432 MiB).
+        # This is the only phys_base that boots (>= 4 GiB resets before any
+        # output). The small RAM window makes xnu's early-I/O VA budget tiny, so
+        # patch 0254 adds a fixed margin to arm_vm_init's budget.
+        mem=(0xa0000000, 0x1b000000),
         # WCN3990 as on beryllium: synthetic locally administered addresses so
         # lsd's first-boot seed does not stall on an absent Wi-Fi controller.
         chosen_extra=[

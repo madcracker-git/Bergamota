@@ -44,12 +44,12 @@
  * follow), so the beryllium buffer would overlap the kernel. Use the clean upper bank instead.
  */
 #ifdef BOARD_SM6375
-/* SM6375 (docs/SM6375_PORT.md): the kernel lives in the clean HIGH bank
- * (0x180000000 + 4 GiB). The download window goes in the low bank's only clean
- * window 0xa0000000..0xbbb00000 (432 MiB; carve-outs end at 0x9d600000 and
- * removed_region@0xc0000000 follows). The payload is ~18 MiB, far under this. */
-#define DL_BASE		0xa0000000UL
-#define DL_SIZE		0x1b000000UL
+/* SM6375 (docs/SM6375_PORT.md): the kernel lives in the low bank's clean
+ * window 0xa0000000..0xbb000000 (432 MiB). The download window goes in the
+ * clean high bank 0x180000000 + 1 GiB (the memory node's third bank), well
+ * clear of the kernel. */
+#define DL_BASE		0x180000000UL
+#define DL_SIZE		0x40000000UL
 #else
 #define DL_BASE		0xb8000000UL
 #define DL_SIZE		0x40000000UL	/* 1 GiB */
