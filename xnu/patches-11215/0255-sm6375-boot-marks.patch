@@ -1,0 +1,74 @@
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 4fc4fbe..c257732 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -639,9 +639,11 @@ arm_init(
+ 		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
+ 	}
+ 	PE_create_console();
++	sweet_early_mark(21, "PE_create_console done");
+ 
+ 	/* setup console output */
+ 	PE_init_printf(FALSE);
++	sweet_early_mark(22, "PE_init_printf done");
+ 
+ #if __arm64__
+ #if DEBUG
+@@ -650,8 +652,10 @@ arm_init(
+ #endif
+ 
+ 	cpu_machine_idle_init(TRUE);
++	sweet_early_mark(23, "cpu_machine_idle_init done");
+ 
+ 	PE_init_platform(TRUE, &BootCpuData);
++	sweet_early_mark(24, "PE_init_platform(TRUE) done");
+ 
+ #if __arm64__
+ 	extern bool cpu_config_correct;
+@@ -660,6 +664,7 @@ arm_init(
+ 	}
+ 
+ 	ml_map_cpu_pio();
++	sweet_early_mark(25, "ml_map_cpu_pio done");
+ 
+ #if APPLE_ARM64_ARCH_FAMILY
+ 	configure_late_apple_regs(true);
+@@ -668,6 +673,7 @@ arm_init(
+ #endif
+ 
+ 	cpu_timebase_init(TRUE);
++	sweet_early_mark(26, "cpu_timebase_init done");
+ 
+ #if KPERF
+ 	/* kptimer_curcpu_up() must be called after cpu_timebase_init */
+@@ -675,7 +681,9 @@ arm_init(
+ #endif /* KPERF */
+ 
+ 	PE_init_cpu();
++	sweet_early_mark(27, "PE_init_cpu done (GIC init)");
+ 	fiq_context_init(TRUE);
++	sweet_early_mark(28, "fiq_context_init done");
+ 
+ 
+ #if HIBERNATION
+@@ -694,6 +702,7 @@ arm_init(
+ 	 * against string vulnerabilities
+ 	 */
+ 	__stack_chk_guard &= ~(0xFFULL << 8);
++	sweet_early_mark(29, "calling machine_startup");
+ 	machine_startup(args);
+ }
+ 
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index a7f18dd..d3b27ac 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -120,7 +120,7 @@ sweet_early_string(const char *s)
+ void
+ sweet_early_mark(unsigned int stage, const char *label)
+ {
+-	if (early_disabled || stage > 20) {
++	if (early_disabled || stage > 30) {
+ 		return;
+ 	}
+ 	if (early_screen) {
