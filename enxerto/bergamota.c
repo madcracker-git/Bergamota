@@ -775,7 +775,7 @@ static void p_gpt_info(void *ctx, struct fb *fb)
 	/* Raw GPT entry dump of LUN 0 (diagnostic): every UTF-16 name, first LBA and
 	 * size, bypassing the allowlist so the real partition names are visible. */
 	{
-		uint8_t hdr[STOR_BLK] __attribute__((aligned(64)));
+		static uint8_t hdr[STOR_BLK] __attribute__((aligned(64)));
 		if (!ufs_read(0, 1, 1, hdr)) {
 			static const char sig[8] = { 'E', 'F', 'I', ' ', 'P', 'A', 'R', 'T' };
 			int ok = 1;
