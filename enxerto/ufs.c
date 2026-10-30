@@ -45,7 +45,19 @@
 #define HCS_UICRDY	(1u << 3)
 
 #define UIC_DME_LINK_STARTUP	0x16
+#define UIC_CMD_DME_SET	0x02
 #define IS_UIC_CMD_COMPL	(1u << 10)
+
+/* UniPro MIB attributes for the power-mode change (JESD220, Linux include/ufs/unipro.h). */
+#define PA_ACTIVETXDATALANES	0x1560
+#define PA_TXGEAR		0x1568
+#define PA_TXTERMINATION	0x1569
+#define PA_HSSERIES		0x156A
+#define PA_PWRMODE		0x1571
+#define PA_ACTIVERXDATALANES	0x1580
+#define PA_RXGEAR		0x1583
+#define PA_RXTERMINATION	0x1584
+#define FAST_MODE		1
 
 #ifdef BOARD_SM6375
 /* SM6375 "blair" GCC UFS clock/power registers (gcc-sm6375.c). GCC at 0x1400000. */
@@ -755,6 +767,60 @@ static int ufs_dme_link_startup(void)
 	ufs_last.target = result;		/* UIC command result (0 = success) */
 	return result == 0 ? 0 : UFS_E_RESP;
 }
+
+/* One DME_SET (UIC_CMD_DME_SET) of a UniPro MIB attribute. Polled, like link startup. */
+static int ufs_dme_set(uint32_t mib, uint32_t val)
+{
+	ufs_wr(REG_IE, ufs_rd(REG_IE) | IS_UIC_CMD_COMPL);
+	ufs_wr(REG_IS, IS_UIC_CMD_COMPL);	/* ack any stale completion */
+	ufs_wr(REG_UIC_ARG1, mib << 16);	/* UIC_ARG_MIB(attr) */
+	ufs_wr(REG_UIC_ARG2, 0);
+	ufs_wr(REG_UIC_ARG3, val);
+	ufs_wr(REG_UIC_CMD, UIC_CMD_DME_SET);
+	uint64_t t = ticks();
+	while (!(ufs_rd(REG_IS) & IS_UIC_CMD_COMPL)) {
+		if (ticks() - t > CMD_TIMEOUT)
+			return ufs_last.rc = UFS_E_TIMEOUT;
+		if (idle_fn)
+			idle_fn();
+	}
+	uint32_t result = ufs_rd(REG_UIC_ARG2) & 0xff;
+	ufs_last.target = result;
+	return result == 0 ? 0 : UFS_E_RESP;
+}
+
+/*
+ * Gear the UniPro link up from PWM-G1 (the post-link-startup default) to HS-G1
+ * FAST mode (Linux ufshcd_dme_change_power_mode + ufshcd_uic_change_pwr_mode).
+ * Without this the link stays at ~3 Mbps PWM-G1 and every transfer crawls
+ * (~0.4 MB/s, observed). HS-G1 is 1248 Mbps, far above the USB 480 Mbps link.
+ */
+static int ufs_gear_up(void)
+{
+	int rc;
+
+	ufs_mark(0x170);			/* gear-up entered */
+	/* 1 lane, HS-G1 (gear 1), rate A (hs_rate 0), FAST mode, terminated. */
+	rc = ufs_dme_set(PA_RXGEAR, 1);
+	if (rc) return rc;
+	rc = ufs_dme_set(PA_ACTIVERXDATALANES, 1);
+	if (rc) return rc;
+	rc = ufs_dme_set(PA_RXTERMINATION, 1);
+	if (rc) return rc;
+	rc = ufs_dme_set(PA_TXGEAR, 1);
+	if (rc) return rc;
+	rc = ufs_dme_set(PA_ACTIVETXDATALANES, 1);
+	if (rc) return rc;
+	rc = ufs_dme_set(PA_TXTERMINATION, 1);
+	if (rc) return rc;
+	rc = ufs_dme_set(PA_HSSERIES, 0);	/* rate A */
+	if (rc) return rc;
+	/* trigger the actual mode change: PA_PWRMODE = FAST << 4 | FAST */
+	rc = ufs_dme_set(PA_PWRMODE, (FAST_MODE << 4) | FAST_MODE);
+	if (rc) return rc;
+	ufs_mark(0x171);			/* gear-up done */
+	return 0;
+}
 #endif /* BOARD_SM6375 */
 
 int ufs_init(void)
@@ -927,6 +993,14 @@ int ufs_init(void)
 #endif
 	if (rc)
 		return rc;
+#ifdef BOARD_SM6375
+	/* gear the link up to HS-G1 FAST mode: the post-startup default is PWM-G1
+	 * (~0.4 MB/s). Without this the iOS root flash takes ~11 hours. */
+	ufs_last.stage = 10;			/* HS gear-up */
+	rc = ufs_gear_up();
+	if (rc)
+		return rc;
+#endif
 	inited = 1;
 	return 0;
 }
