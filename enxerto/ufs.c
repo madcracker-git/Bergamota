@@ -48,7 +48,10 @@
 #define UPIU_QF_STD_WRITE	0x81
 #define UPIU_QOP_READ_FLAG	0x05
 #define UPIU_QOP_SET_FLAG	0x06
+#define UPIU_QOP_READ_ATTR	0x03
+#define UPIU_QOP_WRITE_ATTR	0x04
 #define QRY_IDN_FDEVICEINIT	0x01
+#define QRY_ATTR_REF_CLK_FREQ	0x0a
 #define QRY_RESP_SUCCESS	0x00
 
 #define NQ		8			/* commands in flight */
@@ -410,6 +413,75 @@ static int query_flag(unsigned lun, int set, uint8_t idn, int *flag)
 	return ufs_last.rc = 0;
 }
 
+/* General UFS query request: opcode (READ/WRITE ATTR or FLAG), idn, and an
+ * attribute value to write (for WRITE_ATTR). *out receives the value field low
+ * byte of the response (READ_ATTR / READ_FLAG). Uses slot 0. */
+static int query_req(unsigned lun, uint8_t opcode, uint8_t idn, uint32_t value, int *out)
+{
+	struct utrd *d = &utrl[0];
+	struct ucd *c = &ucd[0];
+	uintptr_t ucd_pa = (uintptr_t)c;
+	uint32_t ocs;
+	int rc;
+	int write = (opcode == UPIU_QOP_WRITE_ATTR || opcode == UPIU_QOP_SET_FLAG);
+
+	if (x_active())
+		return UFS_E_ARGS;
+
+	for (int k = 0; k < 32; k++)
+		c->cmd[k] = 0;
+	c->cmd[0] = UPIU_TC_QUERY_REQ;
+	c->cmd[2] = (uint8_t)lun;
+	c->cmd[5] = write ? UPIU_QF_STD_WRITE : UPIU_QF_STD_READ;
+	c->cmd[12] = opcode;
+	c->cmd[13] = idn;
+	/* value field (bytes 16..19, little-endian DW at query OSF offset +8) */
+	c->cmd[16] = (uint8_t)value;
+	c->cmd[17] = (uint8_t)(value >> 8);
+	c->cmd[18] = (uint8_t)(value >> 16);
+	c->cmd[19] = (uint8_t)(value >> 24);
+
+	for (int k = 0; k < 64; k += 4)
+		w32(&c->resp[k], 0);
+
+	w32(&d->dw0, (1u << 28) | (1u << 24));
+	w32(&d->dw1, 0);
+	w32(&d->dw2, 0x0f);
+	w32(&d->dw3, 0);
+	w32(&d->ucdba, (uint32_t)ucd_pa);
+	w32(&d->ucdbau, (uint32_t)(ucd_pa >> 32));
+	w32(&d->resp, (512u / 4) << 16 | (512u / 4));
+	w32(&d->prdt, 0);
+
+	dc_clean(d, sizeof *d);
+	dc_clean(c->cmd, 32);
+	dc_clean(c->resp, 64);
+	ufs_wr(REG_UTRLDBR, 1u);
+	uint64_t t = ticks();
+	while (ufs_rd(REG_UTRLDBR) & 1u) {
+		if (ticks() - t > CMD_TIMEOUT) {
+			slot_abort(0);
+			return ufs_last.rc = UFS_E_TIMEOUT;
+		}
+		if (idle_fn)
+			idle_fn();
+	}
+	dc_inval(d, sizeof *d);
+	dc_inval(c->resp, 64);
+	ocs = r32(&d->dw2) & 0xff;
+	ufs_last.ocs = ocs;
+	ufs_last.upiu = ((const volatile uint8_t *)c->resp)[0];
+	ufs_last.target = ((const volatile uint8_t *)c->resp)[6];
+	ufs_last.status = ((const volatile uint8_t *)c->resp)[7];
+	if (ocs)
+		return ufs_last.rc = UFS_E_OCS;
+	if (ufs_last.upiu != UPIU_TC_QUERY_RSP || ufs_last.target != QRY_RESP_SUCCESS)
+		return ufs_last.rc = UFS_E_RESP;
+	if (out)
+		*out = ((const volatile uint8_t *)c->resp)[20];
+	return ufs_last.rc = 0;
+}
+
 int ufs_init(void)
 {
 	uint32_t hcs, hce;
@@ -465,8 +537,17 @@ int ufs_init(void)
 	ufs_last.stage = 2;			/* NOP OUT loop done */
 	if (rc)
 		return rc;
-	rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);	/* READ_FLAG first */
+	/* bRefClkFreq: SM6375's UFS reference clock is the 19.2 MHz XO. If ABL left
+	 * it unset (or wrong), device init never completes. READ then WRITE_ATTR. */
+	int rf = -1;
+	rc = query_req(0, UPIU_QOP_READ_ATTR, QRY_ATTR_REF_CLK_FREQ, 0, &rf);
+	if (rc == 0 && rf != 0) {		/* 0 = 19.2 MHz */
+		rc = query_req(0, UPIU_QOP_WRITE_ATTR, QRY_ATTR_REF_CLK_FREQ, 0, 0);
+		if (rc)
+			rc = 0;			/* non-fatal: continue */
+	}
 	ufs_last.stage = 3;			/* READ_FLAG issued */
+	rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);	/* READ_FLAG first */
 	if (rc == 0 && fdi == 0) {
 		rc = query_flag(0, 1, QRY_IDN_FDEVICEINIT, 0);	/* SET_FLAG */
 		if (rc)
