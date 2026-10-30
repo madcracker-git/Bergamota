@@ -1,0 +1,103 @@
+diff --git a/osfmk/kern/mpsc_queue.c b/osfmk/kern/mpsc_queue.c
+index c301804..b49e638 100644
+--- a/osfmk/kern/mpsc_queue.c
++++ b/osfmk/kern/mpsc_queue.c
+@@ -29,6 +29,9 @@
+ #include <machine/machine_cpu.h>
+ #include <kern/locks.h>
+ #include <kern/mpsc_queue.h>
++#if defined(SWEET)
++#include <arm64/sweet_early.h>
++#endif
+ #include <kern/queue.h>
+ #include <kern/thread.h>
+ 
+@@ -468,10 +471,16 @@ thread_deallocate_daemon_init(void)
+ {
+ 	kern_return_t kr;
+ 
++#if defined(SWEET)
++	sweet_early_log("dealloc_daemon_init: creating daemon");
++#endif
+ 	kr = _mpsc_daemon_queue_init_with_thread(&thread_deferred_deallocation_queue,
+ 	    mpsc_daemon_queue_nested_invoke, MINPRI_KERNEL,
+ 	    "daemon.deferred-deallocation", MPSC_QUEUE_KIND_THREAD_CRITICAL,
+ 	    MPSC_DAEMON_INIT_NONE);
++#if defined(SWEET)
++	sweet_early_log("dealloc_daemon_init: daemon created (kr=%d)");
++#endif
+ 	if (kr != KERN_SUCCESS) {
+ 		panic("thread_deallocate_daemon_init: creating daemon failed (%d)", kr);
+ 	}
+diff --git a/osfmk/kern/thread.c b/osfmk/kern/thread.c
+index ea99a0f..98f8cb5 100644
+--- a/osfmk/kern/thread.c
++++ b/osfmk/kern/thread.c
+@@ -112,6 +112,9 @@
+ #include <kern/syscall_subr.h>
+ #include <kern/task.h>
+ #include <kern/thread.h>
++#if defined(SWEET)
++#include <arm64/sweet_early.h>
++#endif
+ #include <kern/thread_group.h>
+ #include <kern/coalition.h>
+ #include <kern/host.h>
+@@ -1243,15 +1246,27 @@ thread_daemon_init(void)
+ {
+ 	kern_return_t   result;
+ 
++#if defined(SWEET)
++	sweet_early_log("thread_daemon_init: enter");
++#endif
+ 	thread_deallocate_daemon_init();
++#if defined(SWEET)
++	sweet_early_log("thread_daemon_init: deallocate_daemon done");
++#endif
+ 
+ 	thread_deallocate_daemon_register_queue(&thread_terminate_queue,
+ 	    thread_terminate_queue_invoke);
+ 
+ 	thread_deallocate_daemon_register_queue(&thread_deallocate_queue,
+ 	    thread_deallocate_queue_invoke);
++#if defined(SWEET)
++	sweet_early_log("thread_daemon_init: register_queue done");
++#endif
+ 
+ 	ipc_object_deallocate_register_queue();
++#if defined(SWEET)
++	sweet_early_log("thread_daemon_init: ipc_object_deallocate done");
++#endif
+ 
+ 	simple_lock_init(&crashed_threads_lock, 0);
+ 	queue_init(&crashed_threads_queue);
+@@ -1259,6 +1274,9 @@ thread_daemon_init(void)
+ 	result = mpsc_daemon_queue_init_with_thread(&thread_stack_queue,
+ 	    thread_stack_queue_invoke, BASEPRI_PREEMPT_HIGH,
+ 	    "daemon.thread-stack", MPSC_DAEMON_INIT_NONE);
++#if defined(SWEET)
++	sweet_early_log("thread_daemon_init: stack daemon created");
++#endif
+ 	if (result != KERN_SUCCESS) {
+ 		panic("thread_daemon_init: thread_stack_daemon");
+ 	}
+@@ -1266,6 +1284,9 @@ thread_daemon_init(void)
+ 	result = mpsc_daemon_queue_init_with_thread(&thread_exception_queue,
+ 	    thread_exception_queue_invoke, MINPRI_KERNEL,
+ 	    "daemon.thread-exception", MPSC_DAEMON_INIT_NONE);
++#if defined(SWEET)
++	sweet_early_log("thread_daemon_init: exception daemon created");
++#endif
+ 
+ 	if (result != KERN_SUCCESS) {
+ 		panic("thread_daemon_init: thread_exception_daemon");
+@@ -1274,6 +1295,9 @@ thread_daemon_init(void)
+ 	result = mpsc_daemon_queue_init_with_thread(&thread_backtrace_queue,
+ 	    thread_backtrace_queue_invoke, MINPRI_KERNEL,
+ 	    "daemon.thread-backtrace", MPSC_DAEMON_INIT_NONE);
++#if defined(SWEET)
++	sweet_early_log("thread_daemon_init: backtrace daemon created");
++#endif
+ 
+ 	if (result != KERN_SUCCESS) {
+ 		panic("thread_daemon_init: thread_backtrace_daemon");
