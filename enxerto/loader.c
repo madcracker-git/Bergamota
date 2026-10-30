@@ -256,13 +256,17 @@ const char *loader_boot_payload(uintptr_t rd_start, uintptr_t rd_end, int verify
 	con_hex("ENTRY", entry_va);
 	bootui_progress(PM_PAYLOAD, "PAYLOAD OK");
 
-	/* The payload must not overlap where the kernel goes. */
-	if (rd_end > phys_base && rd_start < phys_base + mem_size)
-		return "ramdisk overlaps kernel memory";
-
 	/* Kernel destination through boot_args (see below), and the payload: cacheable while we work. */
 	uint64_t kend_pa = kernel_end + pa_of_va_base;
 	uint64_t top_pa = ((kend_pa + adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1)) + PAGE_16K;
+
+	/* The initrd must not overlap the kernel IMAGE destination [phys_base, top_pa).
+	 * (The kernel's whole RAM window is much bigger; the initrd sitting inside it is
+	 * normal on SM6375 — the ABL places it there — and harmless, because the loader
+	 * has finished reading by the time the kernel reuses that RAM.) */
+	if (rd_end > phys_base && rd_start < top_pa)
+		return "ramdisk overlaps kernel image";
+
 	struct mmu_range wb[3] = {
 		{ phys_base, top_pa },
 		{ rd_start, rd_end },
