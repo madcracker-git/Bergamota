@@ -184,11 +184,11 @@ static const char *fb_var(struct fb *fb, unsigned i, const char **name, char *bu
 		*p++ = ' '; *p++ = 'g'; *p++ = '=';
 		p += fb_hex(p, ufs_last.stage, 2);
 		*p++ = ' '; *p++ = 'h'; *p++ = '=';
-		p += fb_hex(p, ufs_last.hcs, 4);
+		p += fb_hex(p, ufs_last.hcs, 2);
 		*p++ = ' '; *p++ = 'i'; *p++ = '=';
-		p += fb_hex(p, ufs_last.is, 4);
+		p += fb_hex(p, ufs_last.is, 2);
 		*p++ = ' '; *p++ = 'c'; *p++ = '=';
-		p += fb_hex(p, ufs_last.cfg1, 4);
+		p += fb_hex(p, ufs_last.cfg1, 2);
 		*p = 0;
 		return buf;
 	}
