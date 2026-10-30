@@ -421,6 +421,28 @@ panics still show. (This matches beryllium; it is not the panic.)
 
 ### M3 — Renegade root (mostly a formality)
 
+**✅ Built (2026-10-30) on the user's M4 Mac.** `ios18-root-full.simg`
+(15 GiB, 16,097,556,832 bytes) passed every check: fsck_hfs clean, `codesign -v`
+150/374 Mach-Os, identity unchanged on 2728 re-signed Mach-Os, chained fixups of
+3465 Mach-Os walk clean, cache signatures valid. Built with the macOS-verified
+path; the only build-time fix was dropping `filter='fully_trusted'` (Python 3.12
+arg) for the Mac's Python 3.11.
+
+Two known gaps in this build (non-blocking for boot):
+- **`/bin/sh` missing** — the ssh tweak needs macOS host binaries
+  (`dropbear-mac`/`toybox-mac`) that the `berga-tools-v3` cache doesn't carry,
+  so the first-boot app-registration + jailbreak post-install job is skipped.
+  Fix later via the cache's on-device `dash`/`dropbear`/`toybox`.
+- Sileo/TrollStore/Procursus userland staged correctly (6869 paths in
+  `/private/var/jb`).
+
+**Flashing (M3→M4 bridge):** the `.simg` is an Android sparse image. Enxerto's
+`ufs.c` is JEDEC-standard and reads `UFS_BASE 0x04804000` from `board.h`, but
+the polled UFS 3.1 flash path is **not yet verified on SM6375** (the
+`BOARD_SM6375` guards in `enxerto.c` still skip `test_ufs()`). The first flash
+attempt will confirm; `tools/bergamota-flash.py flash userdata ...simg` (delta)
+needs the phone's UFS probe to work.
+
 1. Build the iOS 18.7.8 root exactly as today (`tools/renegade/renegade
    fetch-tools fetch root`). This step is SoC-independent.
 2. The `mkboot-full.sh` path keys off `BOARD=beryllium`; add a `BOARD=sm6375`
