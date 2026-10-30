@@ -468,6 +468,33 @@ confirm the link status register before/after. Reference: Linux
 `drivers/ufs/host/ufs-qcom.c` + `ufshcd_link_startup()` (fetched to
 `research/linux-blair/`).
 
+### 🔎 Root cause CONFIRMED (2026-10-31 00:20): QMP UFS PHY init is the missing step
+
+Porting the full Linux `ufshcd_device_init` order (HCE re-execute →
+DME_LINK_STARTUP → NOP OUT → fDeviceInit → TUR, plus the UIC_COMMAND_COMPL
+interrupt enable) got us one step further each time, with the stage counter
+confirming: HCE works (UICRDY asserts), but **DME_LINK_STARTUP times out** — the
+UniPro link can't train because the **QMP UFS PHY was never initialised**.
+
+The Qualcomm flow requires, before any link startup:
+1. **`phy_init()` + `phy_power_on()`** — the QMP UFS PHY PLL + serdes/tx/rx/pcs
+   register sequence (`ufs-qcom.c` lines 516/528)
+2. `ufs_qcom_link_startup_notify(PRE_CHANGE)` — core clock, TX LCC disable,
+   boot-spare-cfg restore
+3. then DME_LINK_STARTUP → NOP OUT → fDeviceInit → TUR
+
+The SM6375 uses `qcom,ufs-phy-qmp-v4-yupik` (PHY MMIO at `0x4807000`), whose
+init tables are **not in mainline Linux** — they live only in Qualcomm's vendor
+kernel (`drivers/phy/qualcomm/phy-qcom-ufs-qmp-v4-yupik.c`). That file was not
+reachable from this machine (CodeLinaro/Android-vendor hosts refused the
+connection during this session).
+
+**Next session (concrete):** fetch `phy-qcom-ufs-qmp-v4-yupik.c` from the
+Qualcomm vendor kernel (CodeLinaro `msm-5.4` or the `android-msm-holi` branch),
+extract the serdes/tx/rx/pcs init tables, and port them into `enxerto/ufs.c`
+as a PHY-init step that runs before HCE/DME_LINK_STARTUP. Everything else in the
+UFS path is already implemented and stage-verified.
+
 1. Build the iOS 18.7.8 root exactly as today (`tools/renegade/renegade
    fetch-tools fetch root`). This step is SoC-independent.
 2. The `mkboot-full.sh` path keys off `BOARD=beryllium`; add a `BOARD=sm6375`
