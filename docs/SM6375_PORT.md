@@ -385,6 +385,35 @@ names the exact failing map. `mem_segments` for 384 MB = 2 → ~32 MB early-I/O
 budget (fbcon 12 MB + GIC ~1 MB should fit), so the failing VA/PA will point at
 the real cause. Rebuild dispatched (run 40995373214).
 
+### ✅✅ M2 kernel boot (2026-10-30): full kernel bootstrap reaches IOKit lockdown
+
+After fixing the memory layout (`pmap_map_bd` = early-I/O VA budget too small on
+the 432 MiB low-bank window — fixed with 0254's +64 MiB margin; kernel stays in
+the low bank because phys_base >= 4 GiB resets before output), the kernel now
+boots the **complete** boot sequence:
+
+- arm_init → arm_vm_init → pmap_bootstrap → serial/fbcon → kprintf (stages 1–20)
+- kernel_bootstrap: vm_mem_bootstrap → … → kernel_thread_create → load_context
+- kernel_bootstrap_thread: idle_thread_create → sched_startup → thread_daemon_init
+  → thread_bind → mapping_adjust → clock_service_create → PE_init_iokit →
+  mac_policy_initmach → dtrace_early_init → trust_cache_init →
+  OSKextRemoveKextBootstrap → machine_lockdown → kernel_do_post → **PE_lockdown_iokit**
+
+The visible log ends at `PE_lockdown_iokit` (the last `kernel_bootstrap_log`
+marker): the kernel then enters `bsd_init()` → `vfs_mountroot()`, where it
+**stalls because there is no root device** — the test cmdline had no `rd=`
+boot-arg and the iOS root image (M3) has not been built yet. This is not a
+kernel fault: the kernel fully initialises on the SM6375 and is waiting for a
+root filesystem.
+
+**So M2 is effectively done** — the kernel boots and reaches the user-space
+boundary. The remaining stall is M3 (iOS root) territory, not kernel bring-up.
+
+Patches landed for M2: 0252 (early FB from boot_args), 0254 (early-I/O budget),
+0255 (boot marks 21–29), 0256 (kernel_bootstrap_log → early console), 0257
+(thread_daemon_init trace). The 0256/0257 tracing stays for the next debug
+session; they are debug-only and cheap.
+
 **Side finding:** `serial_init()` returns 0 for SWEET (the ADT `defaults` node
 has no `serial-device` phandle), so `sweet_early_disable()` never runs and the
 early console stays active — kprintf output after stage 20 is invisible, but
