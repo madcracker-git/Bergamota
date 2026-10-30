@@ -58,6 +58,7 @@
 #define PA_RXGEAR		0x1583
 #define PA_RXTERMINATION	0x1584
 #define FAST_MODE		1
+#define PA_HS_MODE_A		1	/* PA_HSSERIES rate A (Linux unipro.h) */
 
 #ifdef BOARD_SM6375
 /* SM6375 "blair" GCC UFS clock/power registers (gcc-sm6375.c). GCC at 0x1400000. */
@@ -813,7 +814,7 @@ static int ufs_gear_up(void)
 	if (rc) return rc;
 	rc = ufs_dme_set(PA_TXTERMINATION, 1);
 	if (rc) return rc;
-	rc = ufs_dme_set(PA_HSSERIES, 0);	/* rate A */
+	rc = ufs_dme_set(PA_HSSERIES, PA_HS_MODE_A);	/* rate A */
 	if (rc) return rc;
 	/* trigger the actual mode change: PA_PWRMODE = FAST << 4 | FAST */
 	rc = ufs_dme_set(PA_PWRMODE, (FAST_MODE << 4) | FAST_MODE);
