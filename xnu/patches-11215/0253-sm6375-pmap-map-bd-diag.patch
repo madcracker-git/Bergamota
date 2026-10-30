@@ -1,0 +1,13 @@
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 777ef28..f71a773 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -1959,7 +1959,7 @@ pmap_map_bd_with_options(
+ 	while (paddr < end) {
+ 		pt_entry_t *ptep = pmap_pte(kernel_pmap, vaddr);
+ 		if (ptep == PT_ENTRY_NULL) {
+-			panic("pmap_map_bd");
++			panic("pmap_map_bd va=0x%llx pa=0x%llx", (uint64_t)vaddr, (uint64_t)paddr);
+ 		}
+ 
+ 		/**
