@@ -1001,6 +1001,13 @@ int ufs_init(void)
 	rc = ufs_gear_up();
 	if (rc)
 		return rc;
+	/* Leave the host quiet for the kernel: disable interrupts and ack everything
+	 * pending, so the UFS IRQ line is deasserted. The gear-up left REG_IE bit 10
+	 * set and a completion pending; when the kernel's GIC later enables that SPI
+	 * (no handler until sweet_ufs.c runs in vfs_mountroot) it gets an interrupt
+	 * storm that hangs thread_daemon_init. */
+	ufs_wr(REG_IE, 0);
+	ufs_wr(REG_IS, ufs_rd(REG_IS));
 #endif
 	inited = 1;
 	return 0;
