@@ -174,6 +174,13 @@ static const char *fb_var(struct fb *fb, unsigned i, const char **name, char *bu
 		p += fb_hex(p, ufs_last.upiu, 2);
 		*p++ = ' '; *p++ = 's'; *p++ = 't'; *p++ = '=';
 		p += fb_hex(p, ufs_last.status, 2);
+		*p++ = ' '; *p++ = 't'; *p++ = 'g'; *p++ = '=';
+		p += fb_hex(p, ufs_last.target, 2);
+		*p++ = ' '; *p++ = 'k'; *p++ = '=';
+		p += fb_hex(p, ufs_last.sense_key, 2);
+		*p++ = ' '; *p++ = 'a'; *p++ = '=';
+		p += fb_hex(p, ufs_last.asc, 2);
+		p += fb_hex(p, ufs_last.ascq, 2);
 		*p = 0;
 		return buf;
 	}

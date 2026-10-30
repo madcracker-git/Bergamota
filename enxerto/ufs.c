@@ -203,18 +203,27 @@ static int cmd_result(unsigned i)
 	ufs_last.ocs = ocs;
 	ufs_last.status = st;
 	ufs_last.upiu = ((const volatile uint8_t *)c->resp)[0];
-	ufs_last.sense_key = ufs_last.asc = ufs_last.ascq = 0;
-	if (ocs)
-		return ufs_last.rc = UFS_E_OCS;
-	if (((const volatile uint8_t *)c->resp)[0] != 0x21 || ((const volatile uint8_t *)c->resp)[6] != 0)
-		return ufs_last.rc = UFS_E_RESP;	/* not RESPONSE UPIU, or target failure */
-	if (st) {
-		const volatile uint8_t *sd = (const volatile uint8_t *)c->resp + 34;	/* sense data after the 2-byte length */
+	ufs_last.target = ((const volatile uint8_t *)c->resp)[6];	/* UFS status byte in RESPONSE UPIU */
+	/* capture sense data regardless of the UFS status byte (CHECK CONDITION is
+	 * reported alongside UFS_STATUS_FAILURE when the LUN has a unit attention) */
+	{
+		const volatile uint8_t *sd = (const volatile uint8_t *)c->resp + 34;
 		ufs_last.sense_key = sd[2] & 0xf;
 		ufs_last.asc = sd[12];
 		ufs_last.ascq = sd[13];
-		return ufs_last.rc = UFS_E_SCSI;
 	}
+	if (ocs)
+		return ufs_last.rc = UFS_E_OCS;
+	/* UFS 3.1 reports a UNIT ATTENTION (power-on, link-up) as UFS status FAILURE
+	 * (byte 6 = 1) alongside SCSI CHECK CONDITION (byte 7 = 2). The SCSI sense
+	 * data is authoritative: classify by the SCSI status, not the UFS status,
+	 * so the caller's unit-attention retry actually fires. */
+	if (((const volatile uint8_t *)c->resp)[0] != 0x21)
+		return ufs_last.rc = UFS_E_RESP;	/* not a RESPONSE UPIU at all */
+	if (st)
+		return ufs_last.rc = UFS_E_SCSI;
+	if (((const volatile uint8_t *)c->resp)[6] != 0)
+		return ufs_last.rc = UFS_E_RESP;	/* UFS FAILURE with no SCSI status */
 	return ufs_last.rc = 0;
 }
 
