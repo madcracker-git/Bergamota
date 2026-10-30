@@ -310,10 +310,44 @@ the concrete carry/drop/replace list:
 **Note:** the `beryllium-*` count (89) is the *lower bound* on rewrite work;
 several `sweet-*` drivers bake in SDM845 addresses (USB is the big one).
 
-1. First boot: the generic series + the ADT, `sweet-*` only, see how far the
-   early-framebuffer-debug chain (`0003`–`0012`) gets on the Nord.
-2. Then add `sm6375-*` patches one driver at a time (UFS first — already
-   ADT-driven — then display, then USB, then the rest).
+### M2b — First kernel boot (likely ZERO new patches; ADT does the work)
+
+Reviewed the early boot path patch-by-patch (2026-10-30). The key insight is
+that **the kernel is a single binary whose drivers are matched by ADT `compat`
+strings at runtime** — `xnu.yml` always applies the full series (sweet *and*
+beryllium), and each driver activates only if the ADT advertises the matching
+string. My `sm6375` ADT already carries `'qcom,blair' + 'xiaomi,sweet'` (and no
+`qcom,sdm845`), so only the sweet-generic drivers activate. Status of each
+early-boot dependency:
+
+- **GIC + virtual timer (0004, 0017)**: ADT-driven (`gicd_base`/`gicr_base` set
+  from `/arm-io/gic` `reg`; `virtual-timer-intid` from the node) → my per-board
+  `0xf200000`/`0xf240000`/INTID 19 are picked up automatically. ✅
+- **Main framebuffer console (0003)**: reads the ADT `sweet-fbcon` node
+  (`reg`/`width`/`height`/`stride` = absolute phys) → `0x85200000`/1080/2400
+  already correct. ✅
+- **UFS (0028)**: ADT `/sweet-ufs` `reg` → `0x04804000`. ✅
+- **Platform expert (0016)**: matches `'xiaomi,sweet'` (in the sm6375 compat). ✅
+- **Early framebuffer debug (0010, 0012)**: **hardcodes `0x9c000000`** (sweet's
+  FB). On SM6375 that's inside the `cdsp` no-map carve-out, so early-boot
+  kprintf goes to the wrong (invisible) RAM — harmless, but we are **blind
+  during `arm_vm_init`** until the ADT-driven console (0003) is up. If the boot
+  panics before 0003, the first follow-up patch is to make 0010/0012 read the FB
+  base from the ADT (or an `sm6375-*` override to `0x85200000`).
+- **SMP (0065) / boot CPU (0018)**: PSCI + MPIDR; the Nord's MPIDR layout
+  (`0x81000n00`) matches beryllium (verified in Enxerto's GIC test). ✅
+
+So the first boot path needs no new kernel source: build the full default series
+(dispatched), `mkpayload.py` the kernel + sm6375 ADT, pack it with
+`BOARD=sm6375 enxerto/build.sh`, flash, and read the console.
+
+1. ~~Build the generic series~~ (dispatched, run 40987011382 — the full default
+   set is already what `develop` builds).
+2. When the artifact lands: `gh run download` the `xnu-kernel`, then
+   `python3 tools/mkpayload.py kernel sm6375.adt payload.bin` and
+   `BOARD=sm6375 enxerto/build.sh payload.bin` (raw Image, header v3).
+3. Flash `boot_a`, boot, and read the console (via the USB fastboot gadget or
+   the panel).
 
 **Exit:** the kernel prints its boot log to the panel/serial and reaches
 `launchd` (or at least a stable console with a panic we can iterate on).
