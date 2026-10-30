@@ -27,11 +27,6 @@
 #define REG_IS		0x20
 #define REG_HCS		0x30
 #define REG_HCE		0x34
-/* GCC (clock-controller@1400000) UFS power/clocks, from gcc-sm6375.c:
- * the ABL may gate the UFS reference clock and PHY power after boot. */
-#define GCC_BASE_UFSCLK	0x1400000UL
-#define GCC_UFS_MEM_CLKREF	0x8c000		/* clkref, bit 0 (gcc_ufs_mem_clkref_clk) */
-#define GCC_UFS_PHY_GDSCR	0x45004		/* ufs_phy_gdsc (PWRSTS_OFF_ON) */
 #define REG_UTRLBA	0x50
 #define REG_UTRLBAU	0x54
 #define REG_UTRLDBR	0x58
@@ -414,7 +409,7 @@ static int query_flag(unsigned lun, int set, uint8_t idn, int *flag)
 	if (ufs_last.upiu != UPIU_TC_QUERY_RSP || ufs_last.target != QRY_RESP_SUCCESS)
 		return ufs_last.rc = UFS_E_RESP;
 	if (flag)
-		*flag = ((const volatile uint8_t *)c->resp)[20];	/* value field low byte */
+		*flag = ((const volatile uint8_t *)c->resp)[23];	/* value LSB (be32 value at bytes 20..23) */
 	return ufs_last.rc = 0;
 }
 
@@ -440,11 +435,11 @@ static int query_req(unsigned lun, uint8_t opcode, uint8_t idn, uint32_t value, 
 	c->cmd[5] = write ? UPIU_QF_STD_WRITE : UPIU_QF_STD_READ;
 	c->cmd[12] = opcode;
 	c->cmd[13] = idn;
-	/* value field (bytes 16..19, little-endian DW at query OSF offset +8) */
-	c->cmd[16] = (uint8_t)value;
-	c->cmd[17] = (uint8_t)(value >> 8);
-	c->cmd[18] = (uint8_t)(value >> 16);
-	c->cmd[19] = (uint8_t)(value >> 24);
+	/* value field: big-endian 32-bit at query OSF bytes 8..11 = cmd bytes 20..23 */
+	c->cmd[20] = (uint8_t)(value >> 24);
+	c->cmd[21] = (uint8_t)(value >> 16);
+	c->cmd[22] = (uint8_t)(value >> 8);
+	c->cmd[23] = (uint8_t)value;
 
 	for (int k = 0; k < 64; k += 4)
 		w32(&c->resp[k], 0);
@@ -483,7 +478,7 @@ static int query_req(unsigned lun, uint8_t opcode, uint8_t idn, uint32_t value, 
 	if (ufs_last.upiu != UPIU_TC_QUERY_RSP || ufs_last.target != QRY_RESP_SUCCESS)
 		return ufs_last.rc = UFS_E_RESP;
 	if (out)
-		*out = ((const volatile uint8_t *)c->resp)[20];
+		*out = ((const volatile uint8_t *)c->resp)[23];	/* value LSB (be32 at bytes 20..23) */
 	return ufs_last.rc = 0;
 }
 
@@ -525,25 +520,9 @@ int ufs_init(void)
 	    !(ufs_rd(REG_UTRLRSR) & 1))
 		return UFS_E_NOTREADY;
 
-	/* UFS 3.1 device init needs the GCC UFS reference clock and PHY power on.
-	 * ABL may gate these after boot (the device then stays "initializing").
-	 * Enable them the same way we power the USB GCC path in usb_power.c. */
-	{
-		volatile uint32_t *gcc = (volatile uint32_t *)GCC_BASE_UFSCLK;
-		/* ufs_phy_gdsc: clear SW_COLLAPSE (bit 0), wait PWR_ON (bit 31) */
-		uint32_t g = gcc[GCC_UFS_PHY_GDSCR / 4];
-		gcc[GCC_UFS_PHY_GDSCR / 4] = g & ~1u;
-		for (int i = 0; i < 2000 && !(gcc[GCC_UFS_PHY_GDSCR / 4] & (1u << 31)); i++)
-			udelay(5);
-		/* ufs_mem_clkref: enable bit 0, wait until not off (bit 31 = CLK_OFF) */
-		uint32_t c = gcc[GCC_UFS_MEM_CLKREF / 4];
-		gcc[GCC_UFS_MEM_CLKREF / 4] = c | 1u;
-		for (int i = 0; i < 2000 && (gcc[GCC_UFS_MEM_CLKREF / 4] & (1u << 31)); i++)
-			udelay(5);
-	}
 	ufs_last.hcs = ufs_rd(REG_HCS);
 	ufs_last.is = ufs_rd(REG_IS);
-	ufs_last.cfg1 = ufs_rd(REG_VER);	/* reuse cfg1 slot for a stable reg (VER) */
+	ufs_last.cfg1 = ufs_rd(REG_VER);	/* VER, a stable register for the diagnostic */
 
 	static const uint8_t tur[6] = { 0x00 };
 	int rc = 0;
