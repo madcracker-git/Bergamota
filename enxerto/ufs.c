@@ -836,6 +836,12 @@ int ufs_init(void)
 	int rc = 0;
 
 #ifdef BOARD_SM6375
+	/* Polled driver: the ABL booted from UFS and left REG_IE (interrupt enable)
+	 * set. A polled driver must never drive the UFS interrupt line, so zero
+	 * REG_IE first — otherwise every UIC/SCSI completion asserts the SPI to the
+	 * GIC and the kernel later hangs in its early thread bring-up. */
+	ufs_wr(REG_IE, 0);
+	ufs_wr(REG_IS, ufs_rd(REG_IS));		/* ack anything ABL left pending */
 	/*
 	 * Full bring-up in the exact Linux order (ufshcd_hba_execute_hce ->
 	 * ufshcd_link_startup -> ufshcd_make_hba_operational -> device init).
@@ -1003,9 +1009,10 @@ int ufs_init(void)
 	rc = ufs_gear_up();
 	if (rc)
 		return rc;
-	/* Leave the host quiet for the kernel: ack everything pending. REG_IE was
-	 * never set (polled driver), so the UFS interrupt line is not driven and the
-	 * kernel's GIC sees no stray SPI. */
+	/* Leave the host quiet for the kernel: disable interrupts and ack everything
+	 * pending, so the UFS interrupt line is deasserted and no stray SPI reaches
+	 * the kernel's GIC (which has no UFS handler until sweet_ufs.c runs). */
+	ufs_wr(REG_IE, 0);
 	ufs_wr(REG_IS, ufs_rd(REG_IS));
 #endif
 	inited = 1;
