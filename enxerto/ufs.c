@@ -25,6 +25,7 @@
 #define REG_CAP		0x00
 #define REG_VER		0x08
 #define REG_IS		0x20
+#define REG_IE		0x24
 #define REG_HCS		0x30
 #define REG_HCE		0x34
 #define REG_UTRLBA	0x50
@@ -32,9 +33,46 @@
 #define REG_UTRLDBR	0x58
 #define REG_UTRLCLR	0x5c
 #define REG_UTRLRSR	0x60
+#define REG_UIC_CMD	0x90
+#define REG_UIC_ARG1	0x94
+#define REG_UIC_ARG2	0x98
+#define REG_UIC_ARG3	0x9c
 
 #define HCS_DP		(1u << 0)
 #define HCS_UTRLRDY	(1u << 1)
+#define HCS_UTMRLRDY	(1u << 2)
+#define HCS_UICRDY	(1u << 3)
+
+#define UIC_DME_LINK_STARTUP	0x16
+#define IS_UIC_CMD_COMPL	(1u << 10)
+
+#ifdef BOARD_SM6375
+/* SM6375 "blair" GCC UFS clock/power registers (gcc-sm6375.c). GCC at 0x1400000. */
+#define GCC_UFS		0x1400000UL
+#define GCC_UFS_PHY_BCR		0x45000		/* ufs_phy_bcr (core + PHY reset) */
+#define GCC_UFS_PHY_GDSCR	0x45004		/* ufs_phy_gdsc (PWRSTS_OFF_ON) */
+#define GCC_UFS_PHY_AXI_CLK	0x45010		/* branch: core_clk */
+#define GCC_UFS_PHY_AHB_CLK	0x45014		/* branch: iface_clk */
+#define GCC_UFS_PHY_TX_SYM	0x45018		/* branch: tx_lane0_sync_clk */
+#define GCC_UFS_PHY_RX_SYM	0x4501c		/* branch: rx_lane0_sync_clk */
+#define GCC_UFS_PHY_AXI_SRC	0x45020		/* rcg cmd */
+#define GCC_UFS_PHY_UNIPRO_CLK	0x45040		/* branch: core_clk_unipro */
+#define GCC_UFS_PHY_ICE_CLK	0x45044		/* branch: core_clk_ice */
+#define GCC_UFS_PHY_ICE_SRC	0x45048		/* rcg cmd */
+#define GCC_UFS_PHY_UNIPRO_SRC	0x45060		/* rcg cmd */
+#define GCC_UFS_PHY_AUX_CLK	0x45078		/* branch: phy_aux */
+#define GCC_UFS_PHY_AUX_SRC	0x4507c		/* rcg cmd */
+#define GCC_SYS_NOC_UFS_AXI	0x45098		/* branch: bus_aggr_clk */
+#define GCC_UFS_MEM_CLKREF	0x8c000		/* branch: ref_clk */
+
+/* SM6375 QMP UFS PHY (qcom,ufs-phy-qmp-v4-yupik), base 0x4807000. */
+#define UFS_PHY_BASE		0x4807000UL
+#define UFS_PHY_START		0xc00
+#define UFS_PHY_PWR_DOWN	0xc04
+#define UFS_PHY_SW_RESET	0xc08
+#define UFS_PHY_PCS_READY	0xd80
+#define QSERDES_RX0_IFACE_MODE	0x734		/* RX_OFF(0, 0x134) */
+#endif
 
 #define CAP_64AS	(1u << 24)
 
@@ -482,6 +520,182 @@ static int query_req(unsigned lun, uint8_t opcode, uint8_t idn, uint32_t value, 
 	return ufs_last.rc = 0;
 }
 
+#ifdef BOARD_SM6375
+/*
+ * QMP UFS PHY calibration (vendor phy_cal_table_rate_A_no_g4, SM6375 non-G4,
+ * 1 lane): (offset-from-PHY-base, value) pairs, written while SW_RESET is held.
+ * The Nord's DT sets lanes-per-direction=1 and limit-phy-submode=0 (non-G4).
+ */
+static const uint16_t ufs_phy_cal[][2] = {
+	{ 0xc04, 0x01 }, { 0x094, 0xd9 }, { 0x158, 0x11 }, { 0x15c, 0x00 }, { 0x0a4, 0x01 },
+	{ 0x10c, 0x02 }, { 0x058, 0x0f }, { 0x124, 0x00 }, { 0x1bc, 0x11 }, { 0x0bc, 0x82 },
+	{ 0x074, 0x06 }, { 0x07c, 0x16 }, { 0x084, 0x36 }, { 0x0ac, 0xff }, { 0x0b0, 0x0c },
+	{ 0x1ac, 0xac }, { 0x1b0, 0x1e }, { 0x0c4, 0x98 }, { 0x078, 0x06 }, { 0x080, 0x16 },
+	{ 0x088, 0x36 }, { 0x0b4, 0x32 }, { 0x0b8, 0x0f }, { 0x1b4, 0xdd }, { 0x1b8, 0x23 },
+	{ 0x4d8, 0x06 }, { 0x4dc, 0x03 }, { 0x4e0, 0x01 }, { 0x4e4, 0x00 }, { 0x484, 0x35 },
+	{ 0x4b8, 0x0c }, { 0x720, 0x24 }, { 0x71c, 0x0f }, { 0x724, 0x1e }, { 0x728, 0x18 },
+	{ 0x630, 0x0a }, { 0x634, 0x5a }, { 0x644, 0xf1 }, { 0x63c, 0x80 }, { 0x648, 0x80 },
+	{ 0x608, 0x0e }, { 0x614, 0x04 }, { 0x680, 0x1b }, { 0x6ec, 0x06 }, { 0x6f0, 0x04 },
+	{ 0x6f4, 0x1d }, { 0x714, 0x00 }, { 0x700, 0x10 }, { 0x6f8, 0xc0 }, { 0x6fc, 0x00 },
+	{ 0x770, 0x6d }, { 0x774, 0x6d }, { 0x778, 0xed }, { 0x77c, 0x3b }, { 0x780, 0x3c },
+	{ 0x784, 0xe0 }, { 0x788, 0xc8 }, { 0x78c, 0xc8 }, { 0x790, 0x3b }, { 0x794, 0xb1 },
+	{ 0x798, 0xe0 }, { 0x79c, 0xc8 }, { 0x7a0, 0xc8 }, { 0x7a4, 0x3b }, { 0x7a8, 0xb1 },
+	{ 0x7bc, 0x0c }, { 0xd58, 0x6d }, { 0xc30, 0x0a }, { 0xc38, 0x02 }, { 0xdd8, 0x43 },
+	{ 0xd24, 0x1f }, { 0xd50, 0xff }, { 0xc2c, 0x03 }, { 0xc0c, 0x16 }, { 0xc10, 0xd8 },
+	{ 0xd60, 0xaa }, { 0xd68, 0x06 }, { 0xc74, 0x03 }, { 0xcb4, 0x03 },
+};
+
+static inline uint32_t gcc_rd(uint32_t off)
+{
+	uint32_t v = *(volatile uint32_t *)(GCC_UFS + off);
+	__asm__ volatile("dmb sy" ::: "memory");
+	return v;
+}
+static inline void gcc_wr(uint32_t off, uint32_t v)
+{
+	*(volatile uint32_t *)(GCC_UFS + off) = v;
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* Branch clock on: set BIT(0), poll CLK_OFF (bit 31) clear. 0 = on. */
+static int ufs_clk_on(uint32_t off)
+{
+	uint32_t v = gcc_rd(off);
+	if (!(v & 1u))
+		gcc_wr(off, v | 1u);
+	for (int i = 0; i < 2000; i++) {
+		if (!(gcc_rd(off) & (1u << 31)))
+			return 0;
+		udelay(5);
+	}
+	return -1;
+}
+
+/* RCG2: source select (bits 10:8) + hid_div (bits 4:0 = 2*div - 1), then update + root enable. */
+static int ufs_rcg_set(uint32_t cmd, unsigned src, unsigned hid_div)
+{
+	gcc_wr(cmd + 4, (src << 8) | hid_div);
+	gcc_wr(cmd, gcc_rd(cmd) | 1u | 2u);		/* ROOT_EN | UPDATE */
+	for (int i = 0; i < 2000; i++) {
+		if (!(gcc_rd(cmd) & 2u))			/* UPDATE clears when done */
+			return 0;
+		udelay(5);
+	}
+	return -1;
+}
+
+/*
+ * Bring the SM6375 QMP UFS PHY out of reset and run the vendor calibration
+ * (Linux phy_init + phy_power_on + phy_calibrate). Runs BEFORE the controller
+ * is touched; the UniPro link cannot train without it. SM6375's ABL does not
+ * leave the UFS PHY up for a bare-metal taker, so we do the whole sequence:
+ * clocks -> GDSC -> reset -> cal table -> serdes -> PCS_READY.
+ */
+static int ufs_phy_init(void)
+{
+	volatile uint32_t *phy = (volatile uint32_t *)UFS_PHY_BASE;
+	unsigned bad = 0;
+
+	/* 1. power the PHY domain first (ufs_phy_gdsc): clear SW_COLLAPSE, wait PWR_ON */
+	uint32_t g = gcc_rd(GCC_UFS_PHY_GDSCR);
+	gcc_wr(GCC_UFS_PHY_GDSCR, g & ~1u);
+	for (int i = 0; i < 2000 && !(gcc_rd(GCC_UFS_PHY_GDSCR) & (1u << 31)); i++)
+		udelay(5);
+
+	/* 2. RCG sources at known-good frequencies (DT freq-table):
+	 *    axi 100 MHz = GPLL0_OUT_ODD(200MHz, src 4) / 2
+	 *    unipro 75 MHz = GPLL0_OUT_EVEN(300MHz, src 2) / 4
+	 *    ice 150 MHz = GPLL0_OUT_EVEN(src 2) / 2
+	 *    aux 19.2 MHz = BI_TCXO(src 0) / 1 */
+	bad |= !ufs_rcg_set(GCC_UFS_PHY_AXI_SRC, 4, 3) << 0;
+	bad |= !ufs_rcg_set(GCC_UFS_PHY_UNIPRO_SRC, 2, 7) << 1;
+	bad |= !ufs_rcg_set(GCC_UFS_PHY_ICE_SRC, 2, 3) << 2;
+	bad |= !ufs_rcg_set(GCC_UFS_PHY_AUX_SRC, 0, 1) << 3;
+
+	/* 3. branch clocks on (the PHY block and host controller need all of them) */
+	bad |= !ufs_clk_on(GCC_UFS_PHY_AHB_CLK) << 4;	/* iface_clk */
+	bad |= !ufs_clk_on(GCC_UFS_PHY_AXI_CLK) << 5;	/* core_clk */
+	bad |= !ufs_clk_on(GCC_UFS_PHY_UNIPRO_CLK) << 6;
+	bad |= !ufs_clk_on(GCC_UFS_PHY_ICE_CLK) << 7;
+	bad |= !ufs_clk_on(GCC_UFS_PHY_AUX_CLK) << 8;
+	bad |= !ufs_clk_on(GCC_UFS_PHY_TX_SYM) << 9;
+	bad |= !ufs_clk_on(GCC_UFS_PHY_RX_SYM) << 10;
+	bad |= !ufs_clk_on(GCC_SYS_NOC_UFS_AXI) << 11;
+	bad |= !ufs_clk_on(GCC_UFS_MEM_CLKREF) << 12;
+
+	/* 4. PHY reset (BCR) assert, hold SW_RESET, write cal, release both */
+	gcc_wr(GCC_UFS_PHY_BCR, gcc_rd(GCC_UFS_PHY_BCR) | 1u);	/* reset assert */
+	udelay(200);
+	phy[UFS_PHY_SW_RESET / 4] = 0x01;	/* PHY software reset */
+	__asm__ volatile("dmb sy" ::: "memory");
+	/* power_control(power on): clear RX interface CLOCK_EDGE (bit 5) before the table */
+	phy[QSERDES_RX0_IFACE_MODE / 4] &= ~(1u << 5);
+	for (unsigned k = 0; k < sizeof ufs_phy_cal / sizeof ufs_phy_cal[0]; k++)
+		phy[ufs_phy_cal[k][0] / 4] = ufs_phy_cal[k][1];
+	phy[UFS_PHY_SW_RESET / 4] = 0x00;	/* release software reset */
+	__asm__ volatile("dmb sy" ::: "memory");
+	gcc_wr(GCC_UFS_PHY_BCR, gcc_rd(GCC_UFS_PHY_BCR) & ~1u);	/* reset deassert */
+	udelay(200);
+
+	/* 5. start the SERDES and wait for the PCS (physical coding sublayer) */
+	phy[UFS_PHY_START / 4] = 0x01;
+	__asm__ volatile("dmb sy" ::: "memory");
+	for (int i = 0; i < 2000 && !(phy[UFS_PHY_PCS_READY / 4] & 1); i++)
+		udelay(500);			/* up to ~1 s */
+
+	/* record diagnostics: stage 0, hcs = raw HCS, is = PCS_READY, cfg1 = clock failures */
+	ufs_last.hcs = ufs_rd(REG_HCS);
+	ufs_last.is = phy[UFS_PHY_PCS_READY / 4];
+	ufs_last.cfg1 = bad;
+	if (!(phy[UFS_PHY_PCS_READY / 4] & 1))
+		return UFS_E_NOTREADY;
+	return 0;
+}
+
+/* Re-run the host-controller enable (Linux ufshcd_hba_execute_hce). */
+static int ufs_hce_execute(void)
+{
+	ufs_wr(REG_HCE, 0);
+	for (int i = 0; i < 1000 && (ufs_rd(REG_HCE) & 1); i++)
+		udelay(10);
+	ufs_wr(REG_HCE, 1);
+	for (int i = 0; i < 2000 && !(ufs_rd(REG_HCE) & 1); i++)
+		udelay(50);
+	if (!(ufs_rd(REG_HCE) & 1))
+		return UFS_E_NOTREADY;
+	/* wait for UICRDY (the controller's UIC/UniPro layer is up) */
+	for (int i = 0; i < 2000; i++) {
+		if (ufs_rd(REG_HCS) & HCS_UICRDY)
+			return 0;
+		udelay(50);
+	}
+	return UFS_E_NOTREADY;
+}
+
+/* UniPro link startup (Linux ufshcd_dme_link_startup). */
+static int ufs_dme_link_startup(void)
+{
+	if (!(ufs_rd(REG_HCS) & HCS_UICRDY))
+		return UFS_E_NOTREADY;
+	ufs_wr(REG_IE, ufs_rd(REG_IE) | IS_UIC_CMD_COMPL);
+	ufs_wr(REG_IS, IS_UIC_CMD_COMPL);	/* ack any stale completion */
+	ufs_wr(REG_UIC_ARG1, 0);
+	ufs_wr(REG_UIC_ARG2, 0);
+	ufs_wr(REG_UIC_ARG3, 0);
+	ufs_wr(REG_UIC_CMD, UIC_DME_LINK_STARTUP);
+	uint64_t t = ticks();
+	while (!(ufs_rd(REG_IS) & IS_UIC_CMD_COMPL)) {
+		if (ticks() - t > CMD_TIMEOUT)
+			return ufs_last.rc = UFS_E_TIMEOUT;
+		if (idle_fn)
+			idle_fn();
+	}
+	uint32_t result = ufs_rd(REG_UIC_ARG2) & 0xff;
+	ufs_last.target = result;		/* UIC command result (0 = success) */
+	return result == 0 ? 0 : UFS_E_RESP;
+}
+#endif /* BOARD_SM6375 */
+
 int ufs_init(void)
 {
 	uint32_t hcs, hce;
@@ -489,10 +703,38 @@ int ufs_init(void)
 	if (inited)
 		return 0;
 	cap_reg = ufs_rd(REG_CAP);
+	int rc = 0;
+
+#ifdef BOARD_SM6375
+	/*
+	 * Full bring-up: SM6375's ABL does not leave the UFS host/PHY up for a
+	 * bare-metal taker (HCS shows HOST_ERROR_INDICATOR, HCE clear). Re-run the
+	 * Qualcomm sequence: PHY init -> HCE -> DME link startup -> lists -> UTRLRDY.
+	 */
+	ufs_last.stage = 0;			/* QMP PHY init */
+	rc = ufs_phy_init();
+	if (rc)
+		return rc;
+	ufs_last.stage = 1;			/* HCE re-execute */
+	rc = ufs_hce_execute();
+	ufs_last.hcs = ufs_rd(REG_HCS);
+	if (rc)
+		return rc;
+	ufs_last.stage = 2;			/* DME_LINK_STARTUP */
+	rc = ufs_dme_link_startup();
+	ufs_last.hcs = ufs_rd(REG_HCS);
+	if (rc)
+		return rc;
+	hcs = ufs_rd(REG_HCS);
+	if (!(hcs & HCS_DP))
+		return UFS_E_NOTREADY;		/* link trained but no device present */
+#else
 	hcs = ufs_rd(REG_HCS);
 	hce = ufs_rd(REG_HCE);
 	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY))
 		return UFS_E_NOTREADY;
+#endif
+
 	if (ufs_rd(REG_UTRLDBR))
 		return UFS_E_NOTREADY;		/* ABL left requests outstanding: do not touch */
 	nq = (int)(((cap_reg & 0x1f) + 1) / 2);
@@ -520,14 +762,27 @@ int ufs_init(void)
 	    !(ufs_rd(REG_UTRLRSR) & 1))
 		return UFS_E_NOTREADY;
 
+#ifdef BOARD_SM6375
+	/* On SM6375 the list-ready bit is clear until the list base + run-stop are
+	 * programmed, then it asserts. Wait for it before the first doorbell. */
+	ufs_last.stage = 3;			/* transfer list + UTRLRDY */
+	for (int i = 0; i < 2000 && !(ufs_rd(REG_HCS) & HCS_UTRLRDY); i++)
+		udelay(50);
+	if (!(ufs_rd(REG_HCS) & HCS_UTRLRDY))
+		return UFS_E_NOTREADY;
+#endif
+
 	ufs_last.hcs = ufs_rd(REG_HCS);
 	ufs_last.is = ufs_rd(REG_IS);
 	ufs_last.cfg1 = ufs_rd(REG_VER);	/* VER, a stable register for the diagnostic */
 
 	static const uint8_t tur[6] = { 0x00 };
-	int rc = 0;
 	int fdi = 0;
+#ifdef BOARD_SM6375
+	ufs_last.stage = 4;			/* NOP OUT (UTP layer ready) */
+#else
 	ufs_last.stage = 1;			/* entered init, host take-over done */
+#endif
 	/* Linux ufshcd_device_init order: NOP OUT verify (UTP layer ready), then
 	 * fDeviceInit (READ the flag; SET it only if not already set; poll until
 	 * cleared), then TEST UNIT READY. */
@@ -538,7 +793,11 @@ int ufs_init(void)
 		for (int d = 0; d < 10; d++)
 			udelay(1000);
 	}
+#ifdef BOARD_SM6375
+	ufs_last.stage = 5;			/* bRefClkFreq */
+#else
 	ufs_last.stage = 2;			/* NOP OUT loop done */
+#endif
 	if (rc)
 		return rc;
 	/* bRefClkFreq: SM6375's UFS reference clock is the 19.2 MHz XO. If ABL left
@@ -551,7 +810,11 @@ int ufs_init(void)
 		if (rc)
 			rc = 0;			/* non-fatal: continue */
 	}
+#ifdef BOARD_SM6375
+	ufs_last.stage = 6;			/* fDeviceInit READ/SET/poll */
+#else
 	ufs_last.stage = 3;			/* READ_FLAG issued */
+#endif
 	rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);	/* READ_FLAG first */
 	ufs_last.fdi = (uint32_t)fdi;
 	if (rc == 0 && fdi == 0) {
@@ -559,7 +822,9 @@ int ufs_init(void)
 		if (rc)
 			rc = 0;			/* already-initialising is not fatal */
 	}
+#ifndef BOARD_SM6375
 	ufs_last.stage = 4;			/* SET_FLAG done */
+#endif
 	for (int i = 0; i < 300 && rc == 0; i++) {	/* poll READ_FLAG until cleared (30 s) */
 		rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);
 		ufs_last.fdi = (uint32_t)fdi;
@@ -568,7 +833,11 @@ int ufs_init(void)
 		for (int d = 0; d < 100; d++)	/* ~100 ms */
 			udelay(1000);
 	}
+#ifdef BOARD_SM6375
+	ufs_last.stage = 7;			/* TEST UNIT READY */
+#else
 	ufs_last.stage = 5;			/* fDeviceInit poll done */
+#endif
 	/* then TEST UNIT READY until the LUN is ready (30 s) */
 	for (int i = 0; i < 300 && !rc; i++) {
 		rc = scsi_sync(0, tur, sizeof tur, 0, 0, 0);
@@ -579,7 +848,11 @@ int ufs_init(void)
 		for (int d = 0; d < 100; d++)	/* ~100 ms */
 			udelay(1000);
 	}
+#ifdef BOARD_SM6375
+	ufs_last.stage = 8;			/* init complete */
+#else
 	ufs_last.stage = 6;			/* TEST UNIT READY loop done */
+#endif
 	if (rc)
 		return rc;
 	inited = 1;

@@ -182,6 +182,21 @@ static const char *fb_var(struct fb *fb, unsigned i, const char **name, char *bu
 		*p = 0;
 		return buf;
 	}
+	case 17: {
+		/* bootloader-only: raw UFS host/PHY registers (hcs/is/cfg1/target) */
+		*name = "bergamota-ufs2";
+		char *p = buf;
+		*p++ = 'h'; *p++ = '=';
+		p += fb_hex(p, ufs_last.hcs, 2);
+		*p++ = ' '; *p++ = 'i'; *p++ = '=';
+		p += fb_hex(p, ufs_last.is, 2);
+		*p++ = ' '; *p++ = 'c'; *p++ = '=';
+		p += fb_hex(p, ufs_last.cfg1, 2);
+		*p++ = ' '; *p++ = 't'; *p++ = '=';
+		p += fb_hex(p, ufs_last.target, 2);
+		*p = 0;
+		return buf;
+	}
 #endif
 	}
 	return 0;
