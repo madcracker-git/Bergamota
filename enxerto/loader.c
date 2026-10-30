@@ -95,14 +95,33 @@ static int magic_ok(const char *m)
 uint64_t loader_rd_start, loader_rd_end;
 int64_t loader_magic_off;
 
+/* Byte-wise reads for the payload header: the GKI ABL concatenates the vendor
+ * ramdisk + boot ramdisk, so the payload can land at a 4-mod-8 (or any) offset
+ * in the initrd; with the MMU off (Device memory) an unaligned 64-bit load
+ * faults, but byte accesses are always safe. */
+static uint32_t rd_u32(const uint8_t *p)
+{
+	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static uint64_t rd_u64(const uint8_t *p)
+{
+	uint64_t v = 0;
+	for (int i = 7; i >= 0; i--)
+		v = (v << 8) | p[i];
+	return v;
+}
+
 /*
- * Scan [start, end) for the SWEETXNU payload (8-byte aligned). The ABL on GKI
- * devices concatenates the boot ramdisk with the vendor ramdisk in either
- * order, so the payload is not necessarily at the start of the initrd.
+ * Scan [start, end) for the SWEETXNU payload at 4-byte granularity (the vendor
+ * ramdisk size is a multiple of 4, so a concatenated payload is 4-aligned but
+ * not necessarily 8-aligned). The ABL on GKI devices concatenates the boot
+ * ramdisk with the vendor ramdisk in either order, so the payload is not
+ * necessarily at the start of the initrd.
  */
 static int64_t loader_find_magic(uintptr_t start, uintptr_t end)
 {
-	for (uintptr_t p = start & ~7UL; p + 8 <= end; p += 8)
+	for (uintptr_t p = start & ~3UL; p + 8 <= end; p += 4)
 		if (magic_ok((const char *)p))
 			return (int64_t)(p - start);
 	return -1;
@@ -128,41 +147,48 @@ static void inflate_progress(uint64_t done)
  */
 const char *loader_check(uintptr_t rd_start, uintptr_t rd_end)
 {
-	const struct payload *p = (const struct payload *)rd_start;
+	const uint8_t *h = (const uint8_t *)rd_start;
 	uint64_t size = rd_end - rd_start;
 
 	if (rd_end < rd_start || size < sizeof(struct payload))
 		return "payload too short";
-	if (!magic_ok(p->magic))
+	if (!magic_ok((const char *)h))
 		return "no SWEETXNU payload";
-	if ((p->version != 1 && p->version != 2) || (p->adt_off & 7) || (rd_start & 7))
+	uint32_t version = rd_u32(h + 8), nsegs = rd_u32(h + 12);
+	uint64_t adt_off = rd_u64(h + 0x20), adt_size = rd_u64(h + 0x28);
+	uint64_t virt_base = rd_u64(h + 0x10), kernel_end = rd_u64(h + 0x30);
+	uint64_t phys_base = rd_u64(h + 0x38), mem_size = rd_u64(h + 0x40);
+	if ((version != 1 && version != 2) || (adt_off & 7) || (rd_start & 3))
 		return "bad payload header";
-	const unsigned stride = p->version == 2 ? 40 : 32;
-	if (p->nsegs == 0 || p->nsegs > 64 || sizeof(struct payload) + (uint64_t)p->nsegs * stride > size)
+	const unsigned stride = version == 2 ? 40 : 32;
+	if (nsegs == 0 || nsegs > 64 || sizeof(struct payload) + (uint64_t)nsegs * stride > size)
 		return "bad segment table";
-	uint64_t ram_lo = p->phys_base, ram_hi = p->phys_base + p->mem_size;
+	uint64_t ram_lo = phys_base, ram_hi = phys_base + mem_size;
 	if (ram_hi <= ram_lo)
 		return "bad RAM window";
 	if (rd_end > ram_lo && rd_start < ram_hi)
 		return "ramdisk overlaps kernel memory";
-	if (p->adt_off > size || p->adt_size > size - p->adt_off)
+	if (adt_off > size || adt_size > size - adt_off)
 		return "ADT outside payload";
-	uint64_t pa_of_va_base = p->phys_base - p->virt_base;
-	uint64_t kend_pa = p->kernel_end + pa_of_va_base;
-	if (kend_pa < ram_lo || kend_pa >= ram_hi || p->adt_size > ram_hi - kend_pa ||
-	    ram_hi - kend_pa - p->adt_size < 2 * PAGE_16K)
+	uint64_t pa_of_va_base = phys_base - virt_base;
+	uint64_t kend_pa = kernel_end + pa_of_va_base;
+	if (kend_pa < ram_lo || kend_pa >= ram_hi || adt_size > ram_hi - kend_pa ||
+	    ram_hi - kend_pa - adt_size < 2 * PAGE_16K)
 		return "kernel end outside RAM";
-	for (uint32_t i = 0; i < p->nsegs; i++) {
-		const struct payload_seg *s = (const struct payload_seg *)(p->segs + (uint64_t)i * stride);
-		uint64_t pa = s->vmaddr + pa_of_va_base;
-		if (s->file_off > size || s->file_size > size - s->file_off)
+	for (uint32_t i = 0; i < nsegs; i++) {
+		const uint8_t *s = h + sizeof(struct payload) + (uint64_t)i * stride;
+		uint64_t vmaddr = rd_u64(s), vmsize = rd_u64(s + 8);
+		uint64_t file_off = rd_u64(s + 16), file_size = rd_u64(s + 24);
+		uint64_t raw_size = version == 2 ? rd_u64(s + 32) : 0;
+		uint64_t pa = vmaddr + pa_of_va_base;
+		if (file_off > size || file_size > size - file_off)
 			return "segment outside payload";
-		if (pa < ram_lo || pa > kend_pa || s->vmsize > kend_pa - pa)
+		if (pa < ram_lo || pa > kend_pa || vmsize > kend_pa - pa)
 			return "segment outside RAM";
-		if (p->version == 2 && s->raw_size) {
-			if (s->raw_size > s->vmsize)
+		if (version == 2 && raw_size) {
+			if (raw_size > vmsize)
 				return "segment inflates past its size";
-		} else if (s->file_size > s->vmsize) {
+		} else if (file_size > vmsize) {
 			return "segment larger than its size";
 		}
 	}
@@ -203,8 +229,8 @@ const char *loader_boot(uintptr_t dtb)
  */
 const char *loader_boot_payload(uintptr_t rd_start, uintptr_t rd_end, int verify)
 {
-	const struct payload *p = (const struct payload *)rd_start;
-	if (rd_end < rd_start + 8 || !magic_ok(p->magic))
+	const uint8_t *h = (const uint8_t *)rd_start;
+	if (rd_end < rd_start + 8 || !magic_ok((const char *)h))
 		return "no SWEETXNU payload";
 	/* A real payload: switch to the branded boot screen (con_* output becomes its log window). */
 	bootui_init();
@@ -215,25 +241,30 @@ const char *loader_boot_payload(uintptr_t rd_start, uintptr_t rd_end, int verify
 		if (bad)
 			return bad;
 	}
-	if ((p->version != 1 && p->version != 2) || (p->adt_off & 7) || (rd_start & 7))
+	uint32_t version = rd_u32(h + 8), nsegs = rd_u32(h + 12);
+	uint64_t virt_base = rd_u64(h + 0x10), entry_va = rd_u64(h + 0x18);
+	uint64_t adt_off = rd_u64(h + 0x20), adt_size = rd_u64(h + 0x28);
+	uint64_t kernel_end = rd_u64(h + 0x30);
+	uint64_t phys_base = rd_u64(h + 0x38), mem_size = rd_u64(h + 0x40);
+	if ((version != 1 && version != 2) || (adt_off & 7) || (rd_start & 3))
 		return "bad payload header";
-	const unsigned stride = p->version == 2 ? 40 : 32;
+	const unsigned stride = version == 2 ? 40 : 32;
 
-	uint64_t pa_of_va_base = p->phys_base - p->virt_base;	/* pa = va + this */
-	con_hex2("PHYS", "base=", p->phys_base, "size=", p->mem_size);
-	con_hex("VIRT", p->virt_base);
-	con_hex("ENTRY", p->entry_va);
+	uint64_t pa_of_va_base = phys_base - virt_base;	/* pa = va + this */
+	con_hex2("PHYS", "base=", phys_base, "size=", mem_size);
+	con_hex("VIRT", virt_base);
+	con_hex("ENTRY", entry_va);
 	bootui_progress(PM_PAYLOAD, "PAYLOAD OK");
 
 	/* The payload must not overlap where the kernel goes. */
-	if (rd_end > p->phys_base && rd_start < p->phys_base + p->mem_size)
+	if (rd_end > phys_base && rd_start < phys_base + mem_size)
 		return "ramdisk overlaps kernel memory";
 
 	/* Kernel destination through boot_args (see below), and the payload: cacheable while we work. */
-	uint64_t kend_pa = p->kernel_end + pa_of_va_base;
-	uint64_t top_pa = ((kend_pa + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1)) + PAGE_16K;
+	uint64_t kend_pa = kernel_end + pa_of_va_base;
+	uint64_t top_pa = ((kend_pa + adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1)) + PAGE_16K;
 	struct mmu_range wb[3] = {
-		{ p->phys_base, top_pa },
+		{ phys_base, top_pa },
 		{ rd_start, rd_end },
 		{ 0, 0 },	/* the image: filled in from mmu_info */
 	};
@@ -243,42 +274,48 @@ const char *loader_boot_payload(uintptr_t rd_start, uintptr_t rd_end, int verify
 	wb[2] = (struct mmu_range){ mi.img_lo, mi.img_hi };
 	bootui_progress(PM_MMU, "MMU ON");
 
+	/* From here the initrd is Normal write-back (mmu_enable_ranges), so unaligned
+	 * 8-byte reads of the segment table are fine; use byte reads anyway for clarity. */
 	infl_base = 0;
 	infl_total = 0;
-	for (uint32_t i = 0; i < p->nsegs; i++) {
-		const struct payload_seg *s = (const struct payload_seg *)(p->segs + (uint64_t)i * stride);
-		infl_total += (p->version == 2 && s->raw_size) ? s->raw_size : s->file_size;
+	for (uint32_t i = 0; i < nsegs; i++) {
+		const uint8_t *s = h + sizeof(struct payload) + (uint64_t)i * stride;
+		uint64_t raw_size = version == 2 ? rd_u64(s + 32) : 0;
+		infl_total += (version == 2 && raw_size) ? raw_size : rd_u64(s + 24);
 	}
 
-	for (uint32_t i = 0; i < p->nsegs; i++) {
-		const struct payload_seg *s = (const struct payload_seg *)(p->segs + (uint64_t)i * stride);
-		uintptr_t dst = s->vmaddr + pa_of_va_base;
-		uint64_t raw = s->file_size;
-		if (p->version == 2 && s->raw_size) {
-			uint64_t cap = s->vmsize;
-			con_hex2("INFLATE", "in=", (uint32_t)s->file_size, "out=", (uint32_t)s->raw_size);
-			int rc = inflate_raw((const uint8_t *)(rd_start + s->file_off), s->file_size,
+	for (uint32_t i = 0; i < nsegs; i++) {
+		const uint8_t *s = h + sizeof(struct payload) + (uint64_t)i * stride;
+		uint64_t vmaddr = rd_u64(s), vmsize = rd_u64(s + 8);
+		uint64_t file_off = rd_u64(s + 16), file_size = rd_u64(s + 24);
+		uint64_t raw_size = version == 2 ? rd_u64(s + 32) : 0;
+		uintptr_t dst = vmaddr + pa_of_va_base;
+		uint64_t raw = file_size;
+		if (version == 2 && raw_size) {
+			uint64_t cap = vmsize;
+			con_hex2("INFLATE", "in=", (uint32_t)file_size, "out=", (uint32_t)raw_size);
+			int rc = inflate_raw((const uint8_t *)(rd_start + file_off), file_size,
 					     (volatile uint8_t *)dst, &cap, inflate_progress);
-			if (rc || cap != s->raw_size) {
+			if (rc || cap != raw_size) {
 				con_hex2("INFLATE", "rc=", (uint32_t)rc, "got=", (uint32_t)cap);
 				return "inflate failed";
 			}
 			raw = cap;
 		} else {
-			copy64(dst, rd_start + s->file_off, s->file_size);
+			copy64(dst, rd_start + file_off, file_size);
 		}
 		infl_base += raw;
 		bootui_mib("INFLATE", infl_base >> 20, infl_total >> 20, PM_MMU, PM_INFLATE_END);
-		if (s->vmsize > raw)
-			zero64(dst + ((raw + 7) & ~7UL), s->vmsize - ((raw + 7) & ~7UL));
+		if (vmsize > raw)
+			zero64(dst + ((raw + 7) & ~7UL), vmsize - ((raw + 7) & ~7UL));
 	}
-	con_hex2("SEGS", "n=", p->nsegs, "end=", p->kernel_end + pa_of_va_base);
+	con_hex2("SEGS", "n=", nsegs, "end=", kernel_end + pa_of_va_base);
 	bootui_progress(920, "SEGMENTS READY");
 
 	/* ADT, then boot_args, behind the kernel; everything below topOfKernelData is ours. */
-	uintptr_t adt_pa = p->kernel_end + pa_of_va_base;
-	copy64(adt_pa, rd_start + p->adt_off, p->adt_size);
-	uintptr_t ba_pa = (adt_pa + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1);
+	uintptr_t adt_pa = kernel_end + pa_of_va_base;
+	copy64(adt_pa, rd_start + adt_off, adt_size);
+	uintptr_t ba_pa = (adt_pa + adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1);
 	uintptr_t top = ba_pa + PAGE_16K;
 	if (top != top_pa)
 		return "boot_args placement mismatch";
@@ -287,9 +324,9 @@ const char *loader_boot_payload(uintptr_t rd_start, uintptr_t rd_end, int verify
 	volatile struct boot_args *ba = (volatile struct boot_args *)ba_pa;
 	ba->Revision = 2;
 	ba->Version = 2;
-	ba->virtBase = p->virt_base;
-	ba->physBase = p->phys_base;
-	ba->memSize = p->mem_size;
+	ba->virtBase = virt_base;
+	ba->physBase = phys_base;
+	ba->memSize = mem_size;
 	ba->topOfKernelData = top;
 	ba->Video.v_baseAddr = FB_BASE;
 	ba->Video.v_display = 1;
@@ -298,14 +335,14 @@ const char *loader_boot_payload(uintptr_t rd_start, uintptr_t rd_end, int verify
 	ba->Video.v_height = FB_H;
 	ba->Video.v_depth = 32;
 	ba->deviceTreeP = adt_pa - pa_of_va_base;	/* xnu reads it with the MMU on: a VA */
-	ba->deviceTreeLength = (uint32_t)p->adt_size;
+	ba->deviceTreeLength = (uint32_t)adt_size;
 	for (int i = 0; i < BOOT_LINE_LENGTH; i++)
-		ba->CommandLine[i] = p->cmdline[i];
-	ba->memSizeActual = p->mem_size;
+		ba->CommandLine[i] = h[0x48 + i];
+	ba->memSizeActual = mem_size;
 	con_hex2("BOOTARG", "pa=", ba_pa, "top=", top);
 	bootui_progress(960, "BOOT ARGS");
 
-	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
+	uintptr_t entry_pa = entry_va + pa_of_va_base;
 	con_hex("JUMP", entry_pa);
 	bootui_progress(1000, "STARTING IOS");
 	enxerto_charger_handoff();	/* the kernel's sweetcharger=2 finds the charger registers as ABL left them */
