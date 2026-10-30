@@ -85,12 +85,13 @@ BOARDS = {
         gicd=(0xf200000, 0x10000), gicr=(0xf240000, 0x100000),
         # ufshc@4804000 (UFS 3.1)
         ufs=(0x04804000, 0x3000),
-        # Without --highmem: the low bank's clean window between the carve-outs
-        # (cdsp ends 0x9d600000, kboot_uboot_logmem@0x9fe00000..0xa000000) and
-        # removed_region@0xc0000000. 0xa0000000..0xb8000000, 384 MiB. (The low
-        # bank runs to 0xbbb00000, but the end is kept at 0xb8000000 so the
-        # Enxerto download window at 0xb8000000 does not overlap.)
-        mem=(0xa0000000, 0x18000000),
+        # Kernel in the clean HIGH bank (0x180000000 + 4 GiB). The low bank's
+        # only clean window (0xa0000000..0xbbb00000, 432 MiB) is too small for
+        # xnu's early-I/O VA budget (mem_segments=2 -> ~32 MiB, which the 12 MiB
+        # framebuffer map overruns -> pmap_map_bd panic). The high bank gives
+        # mem_segments=16 -> ~162 MiB budget, as beryllium's highmem does. The
+        # framebuffer stays in the low bank (0x85200000) and is mapped apart.
+        mem=(0x180000000, 0x100000000),
         # WCN3990 as on beryllium: synthetic locally administered addresses so
         # lsd's first-boot seed does not stall on an absent Wi-Fi controller.
         chosen_extra=[
