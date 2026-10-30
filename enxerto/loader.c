@@ -90,6 +90,23 @@ static int magic_ok(const char *m)
 	return 1;
 }
 
+/* Diagnostics for the fastboot getvar bergamota-initrd. */
+uint64_t loader_rd_start, loader_rd_end;
+int64_t loader_magic_off;
+
+/*
+ * Scan [start, end) for the SWEETXNU payload (8-byte aligned). The ABL on GKI
+ * devices concatenates the boot ramdisk with the vendor ramdisk in either
+ * order, so the payload is not necessarily at the start of the initrd.
+ */
+static int64_t loader_find_magic(uintptr_t start, uintptr_t end)
+{
+	for (uintptr_t p = start & ~7UL; p + 8 <= end; p += 8)
+		if (magic_ok((const char *)p))
+			return (int64_t)(p - start);
+	return -1;
+}
+
 /* Boot screen progress: INFLATE spans permille 100..900 over all segments' output bytes. */
 #define PM_INITRD	40
 #define PM_PAYLOAD	70
@@ -158,7 +175,10 @@ int loader_has_payload(uintptr_t dtb)
 	if (!fdt_chosen_u64(dtb, "linux,initrd-start", &rd_start) ||
 	    !fdt_chosen_u64(dtb, "linux,initrd-end", &rd_end) || rd_end < rd_start + 8)
 		return 0;
-	return magic_ok((const char *)rd_start);
+	loader_rd_start = rd_start;
+	loader_rd_end = rd_end;
+	loader_magic_off = loader_find_magic(rd_start, rd_end);
+	return loader_magic_off >= 0;
 }
 
 const char *loader_boot(uintptr_t dtb)
@@ -168,7 +188,12 @@ const char *loader_boot(uintptr_t dtb)
 	if (!fdt_chosen_u64(dtb, "linux,initrd-start", &rd_start) ||
 	    !fdt_chosen_u64(dtb, "linux,initrd-end", &rd_end))
 		return "no initrd in /chosen";
-	return loader_boot_payload(rd_start, rd_end, 0);
+	loader_rd_start = rd_start;
+	loader_rd_end = rd_end;
+	loader_magic_off = loader_find_magic(rd_start, rd_end);
+	if (loader_magic_off < 0)
+		return "no SWEETXNU payload in initrd";
+	return loader_boot_payload(rd_start + (uintptr_t)loader_magic_off, rd_end, 0);
 }
 
 /*

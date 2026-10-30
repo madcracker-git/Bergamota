@@ -102,7 +102,11 @@ static void fb_drop_session(struct fb *fb)
  * Variable table as code: a static array of string pointers would need absolute
  * relocations, and the shim image runs wherever ABL put it (build.sh rejects ABS64).
  */
+#ifdef FB_INITRD_DIAG
+#define FB_NVARS 16
+#else
 #define FB_NVARS 15
+#endif
 #define FB_VBUF 48	/* value buffer of fb_getvar */
 
 static const char *fb_var(struct fb *fb, unsigned i, const char **name, char *buf)
@@ -134,6 +138,27 @@ static const char *fb_var(struct fb *fb, unsigned i, const char **name, char *bu
 			return "unavailable";
 		fb->p->charger(fb->p->ctx, i == 14, buf, FB_VBUF);
 		return buf[0] ? buf : "unavailable";
+#ifdef FB_INITRD_DIAG
+	case 15: {
+		/* bootloader-only: where the ABL placed the initrd and the SWEETXNU offset in it */
+		extern uint64_t loader_rd_start, loader_rd_end;
+		extern int64_t loader_magic_off;
+		*name = "bergamota-initrd";
+		char *p = buf;
+		*p++ = 's'; *p++ = '='; *p++ = '0'; *p++ = 'x';
+		p += fb_hex(p, loader_rd_start, 1);
+		*p++ = ' '; *p++ = 'e'; *p++ = '='; *p++ = '0'; *p++ = 'x';
+		p += fb_hex(p, loader_rd_end, 1);
+		*p++ = ' '; *p++ = 'o'; *p++ = '=';
+		if (loader_magic_off < 0) {
+			*p++ = '-'; *p++ = '1';
+		} else {
+			p += fb_hex(p, (uint64_t)loader_magic_off, 1);
+		}
+		*p = 0;
+		return buf;
+	}
+#endif
 	}
 	return 0;
 }

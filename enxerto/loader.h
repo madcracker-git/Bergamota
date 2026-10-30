@@ -12,3 +12,7 @@ const char *loader_check(uintptr_t rd_start, uintptr_t rd_end);
  * Returns only on error; USB and the downloaded data must not be needed afterwards.
  */
 const char *loader_boot_payload(uintptr_t rd_start, uintptr_t rd_end, int verify);
+
+/* Diagnostics for the fastboot getvar bergamota-initrd (where the ABL put the ramdisk). */
+extern uint64_t loader_rd_start, loader_rd_end;
+extern int64_t loader_magic_off;	/* SWEETXNU offset inside [rd_start, rd_end), or -1 */

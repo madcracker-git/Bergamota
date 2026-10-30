@@ -30,6 +30,6 @@ cd /src
 # scripts must be LF. Strip in place (also normalizes the host copy, which is
 # correct for a Unix-developed project).
 sed -i 's/\r$//' enxerto/build.sh enxerto/start.S enxerto/enxerto.ld
-BOARD="$BOARD" bash enxerto/build.sh
+BOARD="$BOARD" bash enxerto/build.sh "${PAYLOAD:-}"
 echo "== done =="
 ls -l enxerto/out/Image enxerto/out/enxerto-boot.img 2>/dev/null || true

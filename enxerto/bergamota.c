@@ -38,8 +38,16 @@
  * of the ABL scratch area near the top of 4 GiB (its USB event buffer was at 0xfdfc8000).
  * It overlaps xnu's default zero-copy low pool (0xb0400000 + 252 MiB), which xnu only touches
  * after the buffer is dead (the loader has copied everything out by then).
+ *
+ * SM6375 (docs/SM6375_PORT.md): the kernel RAM is 0xa0000000..0xbb000000 (the only clean low-bank
+ * window; everything up to 0x9d600000 is carve-outs and removed_region@0xc0000000 + ramoops@0xe9700000
+ * follow), so the beryllium buffer would overlap the kernel. Use the clean upper bank instead.
  */
+#ifdef BOARD_SM6375
+#define DL_BASE		0x180000000UL
+#else
 #define DL_BASE		0xb8000000UL
+#endif
 #define DL_SIZE		0x40000000UL	/* 1 GiB */
 #define DL_MIN		0x04000000UL	/* refuse to run with less than 64 MiB */
 

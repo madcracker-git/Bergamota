@@ -20,7 +20,7 @@ NM=${CROSS}nm
 # -fno-tree-loop-distribute-patterns: no libc, so gcc must not turn loops into memcpy/memset calls (the link would fail).
 # -fno-tree-switch-conversion -fno-jump-tables: gcc turns switches (and if/else chains) that pick between pointers into
 # tables of pointers, which need ABS64 relocations (refused below).
-CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -fno-tree-loop-distribute-patterns -fno-tree-switch-conversion -fno-jump-tables -Wall -Wextra"
+CFLAGS="-O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -fno-tree-loop-distribute-patterns -fno-tree-switch-conversion -fno-jump-tables -Wall -Wextra -DFB_INITRD_DIAG"
 [ "${BOOTLOG:-0}" = 0 ] || CFLAGS="$CFLAGS -DBOOTUI_LOG=1"
 # CHARGER=0 compiles the early fast charging out (charger.c, README); default on. Runtime: boot.img cmdline
 # bergamota.charger=0 (off) / =keep (leave the programmed ICL/FCC in place at the kernel hand-off).

@@ -87,8 +87,10 @@ BOARDS = {
         ufs=(0x04804000, 0x3000),
         # Without --highmem: the low bank's clean window between the carve-outs
         # (cdsp ends 0x9d600000, kboot_uboot_logmem@0x9fe00000..0xa000000) and
-        # removed_region@0xc0000000. 0xa0000000..0xbb000000, 432 MiB.
-        mem=(0xa0000000, 0x1b000000),
+        # removed_region@0xc0000000. 0xa0000000..0xb8000000, 384 MiB. (The low
+        # bank runs to 0xbbb00000, but the end is kept at 0xb8000000 so the
+        # Enxerto download window at 0xb8000000 does not overlap.)
+        mem=(0xa0000000, 0x18000000),
         # WCN3990 as on beryllium: synthetic locally administered addresses so
         # lsd's first-boot seed does not stall on an absent Wi-Fi controller.
         chosen_extra=[
