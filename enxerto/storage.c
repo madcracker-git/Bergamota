@@ -74,44 +74,6 @@ static int scan_lun(struct stor *s, unsigned lun, uint64_t cap, uint32_t *entrie
 	if (crc32(ents, (uint64_t)nent * esz, ~0u, ~0u) != ecrc)
 		return 0;
 	*entries_out = nent;
-	/* diagnostic: dump every raw GPT entry name (bypasses the allowlist) so the
-	 * real partition naming of a new board is visible on the first bring-up. */
-	if (s->line) {
-		static char ln[64];
-		for (uint32_t i = 0; i < nent; i++) {
-			const uint8_t *en = ents + (uint64_t)i * esz;
-			uint64_t first = le64(en + 32), last = le64(en + 40);
-			if (!first)
-				continue;
-			char name[37];
-			unsigned n = 0;
-			for (unsigned c = 0; c < 36; c++) {
-				uint8_t lo = en[56 + 2 * c], hi = en[57 + 2 * c];
-				if (!lo && !hi)
-					break;
-				name[n++] = (hi || lo < 32 || lo >= 127) ? '?' : (char)lo;
-			}
-			name[n] = 0;
-			unsigned p = 0;
-			ln[p++] = 'l'; ln[p++] = (char)('0' + lun); ln[p++] = ' ';
-			for (unsigned k = 0; name[k] && p < sizeof ln - 20; k++)
-				ln[p++] = name[k];
-			ln[p++] = ' ';
-			ln[p++] = '=';
-			ln[p++] = ' ';
-			/* size in MiB (4 KiB blocks >> 8) */
-			uint64_t mib = (last - first + 1) >> 8;
-			char t[16];
-			int tn = 0;
-			do
-				t[tn++] = '0' + mib % 10;
-			while ((mib /= 10) && tn < 15);
-			while (tn && p < sizeof ln - 1)
-				ln[p++] = t[--tn];
-			ln[p] = 0;
-			s->line(s->ctx, ln);
-		}
-	}
 	for (uint32_t i = 0; i < nent; i++) {
 		const uint8_t *en = ents + (uint64_t)i * esz;
 		uint64_t first = le64(en + 32), last = le64(en + 40);

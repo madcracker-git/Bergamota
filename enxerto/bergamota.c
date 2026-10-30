@@ -547,14 +547,6 @@ static void st_cached(void *ctx, int on, const void *lo, const void *hi)
 		mmu_off_ret(win_r);
 }
 
-static void st_line(void *ctx, const char *s)
-{
-	(void)ctx;
-	if (!g_fb)
-		return;
-	fb_info(g_fb, s);
-}
-
 static void st_progress(void *ctx, uint64_t bytes)
 {
 	(void)ctx;
@@ -587,7 +579,6 @@ static const char *st_ensure(void)
 		g_stor.ctx = 0;
 		g_stor.scratch = (uint8_t *)scratch_base;
 		g_stor.cached = st_cached;
-		g_stor.line = st_line;
 		g_stor.progress = st_progress;
 		ufs_set_idle(ui_tick);
 		/* stale dirty lines ABL left in the scratch area must never be evicted over our data */
