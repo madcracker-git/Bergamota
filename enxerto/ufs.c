@@ -643,10 +643,12 @@ static int ufs_phy_init(void)
 	for (int i = 0; i < 2000 && !(phy[UFS_PHY_PCS_READY / 4] & 1); i++)
 		udelay(500);			/* up to ~1 s */
 
-	/* record diagnostics: stage 0, hcs = raw HCS, is = PCS_READY, cfg1 = clock failures */
+	/* record diagnostics: hcs = raw HCS, is = PCS_READY, cfg1 = clock failure
+	 * bitmap, target = ufs_phy_gdsc register (bit31 PWR_ON, bit0 SW_COLLAPSE). */
 	ufs_last.hcs = ufs_rd(REG_HCS);
 	ufs_last.is = phy[UFS_PHY_PCS_READY / 4];
 	ufs_last.cfg1 = bad;
+	ufs_last.target = gcc_rd(GCC_UFS_PHY_GDSCR);
 	if (!(phy[UFS_PHY_PCS_READY / 4] & 1))
 		return UFS_E_NOTREADY;
 	return 0;
