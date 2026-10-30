@@ -27,8 +27,11 @@
 #define REG_IS		0x20
 #define REG_HCS		0x30
 #define REG_HCE		0x34
-#define REG_UFS_CFG1	0xDC	/* Qualcomm vendor: device ref clock control (ufs-qcom.c) */
-#define UFS_CFG1_DEV_REF_CLK_EN (1u << 26)
+/* GCC (clock-controller@1400000) UFS power/clocks, from gcc-sm6375.c:
+ * the ABL may gate the UFS reference clock and PHY power after boot. */
+#define GCC_BASE_UFSCLK	0x1400000UL
+#define GCC_UFS_MEM_CLKREF	0x8c000		/* clkref, bit 0 (gcc_ufs_mem_clkref_clk) */
+#define GCC_UFS_PHY_GDSCR	0x45004		/* ufs_phy_gdsc (PWRSTS_OFF_ON) */
 #define REG_UTRLBA	0x50
 #define REG_UTRLBAU	0x54
 #define REG_UTRLDBR	0x58
@@ -522,14 +525,25 @@ int ufs_init(void)
 	    !(ufs_rd(REG_UTRLRSR) & 1))
 		return UFS_E_NOTREADY;
 
-	/* Qualcomm device reference clock: the UFS 3.1 device needs it running to
-	 * complete device-init (Linux ufs_qcom_dev_ref_clk_ctrl, REG_UFS_CFG1 bit 26).
-	 * ABL may gate it after boot; enable it before the init handshake. */
-	ufs_wr(REG_UFS_CFG1, ufs_rd(REG_UFS_CFG1) | UFS_CFG1_DEV_REF_CLK_EN);
-	ufs_rd(REG_UFS_CFG1);	/* force the write through */
+	/* UFS 3.1 device init needs the GCC UFS reference clock and PHY power on.
+	 * ABL may gate these after boot (the device then stays "initializing").
+	 * Enable them the same way we power the USB GCC path in usb_power.c. */
+	{
+		volatile uint32_t *gcc = (volatile uint32_t *)GCC_BASE_UFSCLK;
+		/* ufs_phy_gdsc: clear SW_COLLAPSE (bit 0), wait PWR_ON (bit 31) */
+		uint32_t g = gcc[GCC_UFS_PHY_GDSCR / 4];
+		gcc[GCC_UFS_PHY_GDSCR / 4] = g & ~1u;
+		for (int i = 0; i < 2000 && !(gcc[GCC_UFS_PHY_GDSCR / 4] & (1u << 31)); i++)
+			udelay(5);
+		/* ufs_mem_clkref: enable bit 0, wait until not off (bit 31 = CLK_OFF) */
+		uint32_t c = gcc[GCC_UFS_MEM_CLKREF / 4];
+		gcc[GCC_UFS_MEM_CLKREF / 4] = c | 1u;
+		for (int i = 0; i < 2000 && (gcc[GCC_UFS_MEM_CLKREF / 4] & (1u << 31)); i++)
+			udelay(5);
+	}
 	ufs_last.hcs = ufs_rd(REG_HCS);
 	ufs_last.is = ufs_rd(REG_IS);
-	ufs_last.cfg1 = ufs_rd(REG_UFS_CFG1);
+	ufs_last.cfg1 = ufs_rd(REG_VER);	/* reuse cfg1 slot for a stable reg (VER) */
 
 	static const uint8_t tur[6] = { 0x00 };
 	int rc = 0;
