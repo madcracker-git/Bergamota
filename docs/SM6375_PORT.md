@@ -334,6 +334,16 @@ early-boot dependency:
   during `arm_vm_init`** until the ADT-driven console (0003) is up. If the boot
   panics before 0003, the first follow-up patch is to make 0010/0012 read the FB
   base from the ADT (or an `sm6375-*` override to `0x85200000`).
+  **✅ Fixed (0252, 2026-10-30):** the first boot reached the kernel (device left
+  fastboot/adb, showed the Enxerto "STARTING IOS" hand-off frame) but produced
+  no early console — the stage-0 band write to 0x9c000000 faults in the cdsp
+  carve-out before any output. `0252-sm6375-early-fb.patch` derives the early
+  console's 32MB framebuffer block from `boot_args->Video.v_baseAddr` at runtime
+  (genassym.c BA_VIDEO_BASE; start.s stage-0 band + bootstrap block mapping;
+  arm_vm_init.c sweet_early_map_final via sweet_early_block_pa(); sweet_early.c
+  runtime early_block_pa). Board-agnostic: sweet/beryllium resolve to the same
+  0x9c000000 block as before. `git apply --check` verified against the patched
+  tree; rebuild dispatched (run 40991838544).
 - **SMP (0065) / boot CPU (0018)**: PSCI + MPIDR; the Nord's MPIDR layout
   (`0x81000n00`) matches beryllium (verified in Enxerto's GIC test). ✅
 
