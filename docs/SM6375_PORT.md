@@ -547,6 +547,29 @@ partition table (dump the actual UTF-16 GPT names, or read the device fstab).
 Also the re-scan hang (likely a DMA/cache or RPMB-LUN read issue) needs fixing
 before `fastboot flash userdata`.
 
+### ✅ RESOLVED (2026-10-31 03:14): `userdata` located + write speed fixed
+
+- **`userdata` is on LUN 0 = 111.8 GiB** (`0x1a0c10f000`), not A/B. The raw
+  GPT dump (`l0 userdata = 106689 MiB`) confirmed it; the earlier "no parts"
+  was only the verbose diagnostic exhausting the USB TX endpoint, since
+  removed.
+- **Write speed was ~0.4 MB/s** because the UniPro link stayed at the
+  post-link-startup PWM-G1 gear. Ported `ufshcd_dme_change_power_mode` +
+  `ufshcd_uic_change_pwr_mode`: DME_SET of PA_RXGEAR/PA_ACTIVERXDATALANES/
+  PA_RXTERMINATION/PA_TXGEAR/PA_ACTIVETXDATALANES/PA_TXTERMINATION/
+  PA_HSSERIES (rate A = **1**, not 0) then PA_PWRMODE = FAST<<4|FAST. This
+  gears the link to HS-G1 (1248 Mbps) and the write jumped to **~100 MB/s**
+  (USB-limited): the 15 GiB root flashed in ~10 minutes.
+- `oem ufsinit` now completes at `g=0a` (gear-up done), and `fastboot -S 512M
+  flash userdata` streams the sparse image at full speed.
+
+### ✅✅✅ iOS ROOT FLASHED (2026-10-31 03:28)
+
+`d:\ios18-root-full.simg` (15 GiB, iOS 18.7.8) flashed to `userdata` in 602 s
+with `fastboot -S 512M flash userdata`, no errors. **Next: build the cold-boot
+payload (`mkpayload.py` xnu-kernel + sm6375.adt + `rd=ufsroot0`) and boot into
+the full iOS root.**
+
 1. Build the iOS 18.7.8 root exactly as today (`tools/renegade/renegade
    fetch-tools fetch root`). This step is SoC-independent.
 2. The `mkboot-full.sh` path keys off `BOARD=beryllium`; add a `BOARD=sm6375`
