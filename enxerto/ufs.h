@@ -26,6 +26,7 @@ struct ufs_last {
 	uint32_t ocs, status, sense_key, asc, ascq;
 	uint32_t upiu;		/* response UPIU type byte (0x21 = RESPONSE) */
 	uint32_t target;	/* UFS status byte of the RESPONSE UPIU (0 = success) */
+	uint32_t stage;		/* init progress marker (0 = none, N = where it stopped) */
 	int rc;
 };
 extern struct ufs_last ufs_last;

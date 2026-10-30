@@ -451,6 +451,7 @@ int ufs_init(void)
 	static const uint8_t tur[6] = { 0x00 };
 	int rc = 0;
 	int fdi = 0;
+	ufs_last.stage = 1;			/* entered init, host take-over done */
 	/* Linux ufshcd_device_init order: NOP OUT verify (UTP layer ready), then
 	 * fDeviceInit (READ the flag; SET it only if not already set; poll until
 	 * cleared), then TEST UNIT READY. */
@@ -461,14 +462,17 @@ int ufs_init(void)
 		for (int d = 0; d < 10; d++)
 			udelay(1000);
 	}
+	ufs_last.stage = 2;			/* NOP OUT loop done */
 	if (rc)
 		return rc;
 	rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);	/* READ_FLAG first */
+	ufs_last.stage = 3;			/* READ_FLAG issued */
 	if (rc == 0 && fdi == 0) {
 		rc = query_flag(0, 1, QRY_IDN_FDEVICEINIT, 0);	/* SET_FLAG */
 		if (rc)
 			rc = 0;			/* already-initialising is not fatal */
 	}
+	ufs_last.stage = 4;			/* SET_FLAG done */
 	for (int i = 0; i < 200 && rc == 0; i++) {	/* poll READ_FLAG until cleared */
 		rc = query_flag(0, 0, QRY_IDN_FDEVICEINIT, &fdi);
 		if (rc || !fdi)
@@ -476,6 +480,7 @@ int ufs_init(void)
 		for (int d = 0; d < 100; d++)	/* ~100 ms */
 			udelay(1000);
 	}
+	ufs_last.stage = 5;			/* fDeviceInit poll done */
 	/* then TEST UNIT READY until the LUN is ready */
 	for (int i = 0; i < 100 && !rc; i++) {
 		rc = scsi_sync(0, tur, sizeof tur, 0, 0, 0);
@@ -486,6 +491,7 @@ int ufs_init(void)
 		for (int d = 0; d < 50; d++)	/* ~50 ms */
 			udelay(1000);
 	}
+	ufs_last.stage = 6;			/* TEST UNIT READY loop done */
 	if (rc)
 		return rc;
 	inited = 1;
