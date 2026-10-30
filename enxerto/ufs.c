@@ -744,13 +744,15 @@ static int ufs_hce_start(void)
 	return UFS_E_NOTREADY;
 }
 
-/* UniPro link startup (Linux ufshcd_dme_link_startup). */
+/* UniPro link startup (Linux ufshcd_dme_link_startup). Polled: the UIC
+ * completion is read from REG_IS (set regardless of REG_IE), so REG_IE is
+ * left alone — a polled driver must never enable the interrupt output, or the
+ * host asserts its GIC line and the kernel later hangs on the stray SPI. */
 static int ufs_dme_link_startup(void)
 {
 	ufs_mark(0x140);			/* DME link startup */
 	if (!(ufs_rd(REG_HCS) & HCS_UICRDY))
 		return UFS_E_NOTREADY;
-	ufs_wr(REG_IE, ufs_rd(REG_IE) | IS_UIC_CMD_COMPL);
 	ufs_wr(REG_IS, IS_UIC_CMD_COMPL);	/* ack any stale completion */
 	ufs_wr(REG_UIC_ARG1, 0);
 	ufs_wr(REG_UIC_ARG2, 0);
@@ -769,10 +771,10 @@ static int ufs_dme_link_startup(void)
 	return result == 0 ? 0 : UFS_E_RESP;
 }
 
-/* One DME_SET (UIC_CMD_DME_SET) of a UniPro MIB attribute. Polled, like link startup. */
+/* One DME_SET (UIC_CMD_DME_SET) of a UniPro MIB attribute. Polled, like link
+ * startup: REG_IS is read (not REG_IE) so the interrupt line is never driven. */
 static int ufs_dme_set(uint32_t mib, uint32_t val)
 {
-	ufs_wr(REG_IE, ufs_rd(REG_IE) | IS_UIC_CMD_COMPL);
 	ufs_wr(REG_IS, IS_UIC_CMD_COMPL);	/* ack any stale completion */
 	ufs_wr(REG_UIC_ARG1, mib << 16);	/* UIC_ARG_MIB(attr) */
 	ufs_wr(REG_UIC_ARG2, 0);
@@ -1001,12 +1003,9 @@ int ufs_init(void)
 	rc = ufs_gear_up();
 	if (rc)
 		return rc;
-	/* Leave the host quiet for the kernel: disable interrupts and ack everything
-	 * pending, so the UFS IRQ line is deasserted. The gear-up left REG_IE bit 10
-	 * set and a completion pending; when the kernel's GIC later enables that SPI
-	 * (no handler until sweet_ufs.c runs in vfs_mountroot) it gets an interrupt
-	 * storm that hangs thread_daemon_init. */
-	ufs_wr(REG_IE, 0);
+	/* Leave the host quiet for the kernel: ack everything pending. REG_IE was
+	 * never set (polled driver), so the UFS interrupt line is not driven and the
+	 * kernel's GIC sees no stray SPI. */
 	ufs_wr(REG_IS, ufs_rd(REG_IS));
 #endif
 	inited = 1;
