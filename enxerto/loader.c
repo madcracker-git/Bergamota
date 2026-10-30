@@ -91,6 +91,19 @@ static int magic_ok(const char *m)
 	return 1;
 }
 
+/* Return non-zero if needle occurs in the (up to BOOT_LINE_LENGTH) haystack. */
+static int str_find(const char *hay, const char *needle)
+{
+	for (int i = 0; i < BOOT_LINE_LENGTH && hay[i]; i++) {
+		int j = 0;
+		while (needle[j] && hay[i + j] == needle[j])
+			j++;
+		if (!needle[j])
+			return 1;
+	}
+	return 0;
+}
+
 /* Diagnostics for the fastboot getvar bergamota-initrd. */
 uint64_t loader_rd_start, loader_rd_end;
 int64_t loader_magic_off;
@@ -353,8 +366,9 @@ const char *loader_boot_payload(uintptr_t rd_start, uintptr_t rd_end, int verify
 #ifdef BOARD_SM6375
 	/* Bring the UFS host up (full Qualcomm sequence + HS gear-up) and leave it
 	 * running, so the kernel's sweet_ufs.c finds it ready to take over. SM6375's
-	 * ABL does NOT leave UFS up for a bare-metal taker (HCE clear, host error). */
-	{
+	 * ABL does NOT leave UFS up for a bare-metal taker (HCE clear, host error).
+	 * Payload cmdline flag sweetufs=0 skips it (diagnostic isolation). */
+	if (!str_find((const char *)h + 0x48, "sweetufs=0")) {
 		int urc = ufs_init();
 		con_hex2("UFS", "init=", (uint32_t)urc, "stage=", ufs_last.stage);
 	}
