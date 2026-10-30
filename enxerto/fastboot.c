@@ -107,7 +107,7 @@ static void fb_drop_session(struct fb *fb)
  * relocations, and the shim image runs wherever ABL put it (build.sh rejects ABS64).
  */
 #ifdef FB_INITRD_DIAG
-#define FB_NVARS 17
+#define FB_NVARS 18
 #else
 #define FB_NVARS 15
 #endif
@@ -684,6 +684,27 @@ static void fb_oem(struct fb *fb, const char *a)
 		if (fb->p->gpt_info)
 			fb->p->gpt_info(fb->p->ctx, fb);
 		fb_resp(fb, "OKAY", "");
+#ifdef FB_INITRD_DIAG
+	} else if (fb_eq(a, "ufsinit")) {
+		/* run the full UFS bring-up once and report the raw result */
+		int rc = ufs_init();
+		char line[FB_VBUF];
+		char *p = line;
+		*p++ = 'r'; *p++ = 'c'; *p++ = '=';
+		p += fb_hex(p, (uint32_t)rc, 1);
+		*p++ = ' '; *p++ = 'g'; *p++ = '=';
+		p += fb_hex(p, ufs_last.stage, 2);
+		*p++ = ' '; *p++ = 'h'; *p++ = '=';
+		p += fb_hex(p, ufs_last.hcs, 2);
+		*p++ = ' '; *p++ = 'i'; *p++ = '=';
+		p += fb_hex(p, ufs_last.is, 2);
+		*p++ = ' '; *p++ = 'c'; *p++ = '=';
+		p += fb_hex(p, ufs_last.cfg1, 2);
+		*p++ = ' '; *p++ = 't'; *p++ = '=';
+		p += fb_hex(p, ufs_last.target, 2);
+		*p = 0;
+		fb_resp(fb, rc ? "FAIL" : "OKAY", line);
+#endif
 	} else {
 		fb_resp(fb, "FAIL", "unknown oem command");
 	}
