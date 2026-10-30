@@ -443,6 +443,31 @@ the polled UFS 3.1 flash path is **not yet verified on SM6375** (the
 attempt will confirm; `tools/bergamota-flash.py flash userdata ...simg` (delta)
 needs the phone's UFS probe to work.
 
+### ⏳ UFS device-init blocked (2026-10-30) — the active work
+
+The iOS root is built and on `d:\ios18-root-full.simg`, but the SM6375 UFS 3.1
+**won't leave device-init**, so nothing can be flashed yet. Diagnosis so far
+(all in `enxerto/ufs.c`, all committed to `sm6375-port`):
+
+- Transport layer is healthy: NOP OUT → NOP IN works; SCSI/query UPIUs get
+  clean responses (SMMU/DMA fine). `UFS_BASE 0x04804000` correct.
+- The LUN answers every command with SCSI sense **`02/04 02` = "logical unit
+  not ready, initializing command required"** and the `fDeviceInit` flag
+  **never clears** (`g=06` stage counter reaches the TUR poll and stops).
+- Tried and ruled out: TEST UNIT READY retry (stays not-ready), START STOP UNIT
+  (rejected "invalid field in CDB"), fDeviceInit SET_FLAG (GENERAL_FAILURE =
+  already set), NOP OUT verify (works but no effect), bRefClkFreq = 19.2 MHz
+  (no change).
+
+**Likely root cause (next session):** the UniPro link / PHY did not fully train
+or the device is waiting on a link-speed (gear) config the ABL normally
+completes; by taking over the UFS host's transfer list mid-boot we interrupt
+that handshake. Next: port the Qualcomm UFS PHY soft-reset + link-startup
+(`REG_UFS_CFG1` PHY soft-reset at UFS_BASE+0xDC, `ufs_qcom.c` link init), and
+confirm the link status register before/after. Reference: Linux
+`drivers/ufs/host/ufs-qcom.c` + `ufshcd_link_startup()` (fetched to
+`research/linux-blair/`).
+
 1. Build the iOS 18.7.8 root exactly as today (`tools/renegade/renegade
    fetch-tools fetch root`). This step is SoC-independent.
 2. The `mkboot-full.sh` path keys off `BOARD=beryllium`; add a `BOARD=sm6375`
