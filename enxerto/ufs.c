@@ -89,6 +89,17 @@ static uint64_t ticks(void)
 	return t;
 }
 
+static void udelay(unsigned us)
+{
+	uint64_t f, t;
+	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+	__asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(t));
+	uint64_t end = t + f / 1000000 * us;
+	do
+		__asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(t));
+	while (t < end);
+}
+
 static uint32_t pk(uint32_t b0, uint32_t b1, uint32_t b2, uint32_t b3)
 {
 	return b0 | b1 << 8 | b2 << 16 | b3 << 24;
@@ -306,22 +317,19 @@ int ufs_init(void)
 		return UFS_E_NOTREADY;
 
 	static const uint8_t tur[6] = { 0x00 };
-	static const uint8_t ssu[6] = { 0x1b, 0, 0, 0, 0x01, 0 };	/* START STOP UNIT, START bit (LUN on) */
 	int rc = 0;
-	/* UFS 3.1 (SM6375) leaves the LUN in "initializing command required"
-	 * (sense 02/04 02) after ABL: START STOP UNIT brings it online. UFS 2.1
-	 * (SDM845) is already ready, where this returns "already started" (harmless). */
-	for (int i = 0; i < 4; i++) {
-		rc = scsi_sync(0, ssu, sizeof ssu, 0, 0, 0);
-		if (!rc)
-			break;
-		if (!(rc == UFS_E_SCSI && ufs_last.sense_key == 2))
-			break;		/* NOT READY: retry; anything else, stop */
-	}
-	for (int i = 0; i < 4 && !rc; i++) {	/* then TEST UNIT READY until clean */
+	/* UFS 3.1 (SM6375) boots the LUN in "not ready, initializing" (sense
+	 * 02/04 02). There is no explicit start command to send: the media comes
+	 * ready on its own, so poll TEST UNIT READY with a real delay, accepting
+	 * sense key 2 (NOT READY) as "still initializing, keep waiting". */
+	for (int i = 0; i < 100; i++) {
 		rc = scsi_sync(0, tur, sizeof tur, 0, 0, 0);
 		if (!rc)
 			break;
+		if (rc != UFS_E_SCSI || ufs_last.sense_key != 2)
+			break;		/* not "not ready": a real error, stop */
+		for (int d = 0; d < 50; d++)	/* ~50 ms */
+			udelay(1000);
 	}
 	if (rc)
 		return rc;
