@@ -479,7 +479,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  	if (!error) {
  		static const uint8_t tur[6] = { 0x00 };
  		/* The first command after the bootloader may report a unit attention. */
-@@ -1117,6 +1541,19 @@
+@@ -1117,9 +1541,27 @@
  		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
  		}
  		printf("SWEET UFS: TUR %d\n", error);
@@ -499,3 +499,11 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  	}
  	if (!error) {
  		error = ufs_find_partition(want);
++		if (error && sweet_board_sm6375()) {
++			panic("SM6375 UFS: find_partition failed %d: cdb 0x%x ocs 0x%x upiu 0x%x resp 0x%x status 0x%x sense 0x%x hcs 0x%x is 0x%x",
++			    error, ss.last_cdb, ss.last_ocs, ss.last_upiu, ss.last_resp,
++			    ss.last_status, ss.last_sense, ss.last_hcs, ss.last_is);
++		}
+ 	}
+ 	lck_mtx_unlock(&sweet_ufs_lock);
+ 	if (error) {
