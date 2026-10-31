@@ -23,7 +23,7 @@ diff --git a/bsd/dev/sweet_board.h b/bsd/dev/sweet_board.h
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -623,11 +623,392 @@
+@@ -623,11 +623,404 @@
  	return ENOENT;
  }
  
@@ -289,6 +289,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +{
 +	uint8_t fdi = 0;
 +	int rc;
++	uint64_t deadline;
 +
 +	/* bRefClkFreq must be 0 (19.2 MHz) for the XO on this SoC. */
 +	uint8_t rf = 0xff;
@@ -304,12 +305,23 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +			rc = 0;		/* already initialising is not fatal */
 +		}
 +	}
-+	for (int i = 0; i < 300 && rc == 0; i++) {
++	/* Poll READ_FLAG until the device clears it, up to 30 s (Linux FDEVICEINIT
++	 * timeout). XNU's delay() is in MICROseconds, so 100 ms = delay(100000). */
++	nanoseconds_to_absolutetime(30ull * NSEC_PER_SEC, &deadline);
++	deadline += mach_absolute_time();
++	for (;;) {
++		if (rc) {
++			break;
++		}
 +		rc = sm6375_query(0x01, 0x05, 0x01, 0, &fdi);
 +		if (rc || !fdi) {
 +			break;
 +		}
-+		delay(1000);		/* ~100 ms */
++		if (mach_absolute_time() > deadline) {
++			rc = ETIMEDOUT;
++			break;
++		}
++		delay(100000);		/* 100 ms */
 +	}
 +	return rc;
 +}
@@ -417,7 +429,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  		printf("SWEET UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
  		return ENXIO;
  	}
-@@ -651,8 +1032,18 @@
+@@ -651,8 +1044,18 @@
  	/* Never ring a doorbell unless the host uses our list. */
  	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
  	    !(ufs_rd(REG_UTRLRSR) & 1)) {
@@ -438,7 +450,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  	}
  	return 0;
  }
-@@ -1109,7 +1500,28 @@
+@@ -1109,7 +1512,28 @@
  	su.secsize = DEV_BSIZE;
  
  	lck_mtx_lock(&sweet_ufs_lock);
@@ -467,7 +479,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  	if (!error) {
  		static const uint8_t tur[6] = { 0x00 };
  		/* The first command after the bootloader may report a unit attention. */
-@@ -1117,6 +1529,14 @@
+@@ -1117,6 +1541,14 @@
  		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
  		}
  		printf("SWEET UFS: TUR %d\n", error);
