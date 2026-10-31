@@ -102,6 +102,22 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	{ 0xd60, 0xaa }, { 0xd68, 0x06 }, { 0xc74, 0x03 }, { 0xcb4, 0x03 },
 +};
 +
++/* Microsecond busy-wait on the arch counter (same as Enxerto's udelay). XNU's
++ * delay() can block on the boot thread during vfs_mountroot (it calls
++ * thread_block() when interrupts are enabled and preemption is 0); the counter
++ * is always running once the timebase is up, so this never blocks. */
++static void
++sm6375_udelay(unsigned us)
++{
++	uint64_t f, t, end;
++	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
++	__asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(t));
++	end = t + f / 1000000 * us;
++	do {
++		__asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(t));
++	} while (t < end);
++}
++
 +/* Polled UIC command (DME). Result code in REG_UIC_ARG2. */
 +static int
 +sm6375_uic_cmd(uint32_t cmd, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t *res)
@@ -149,22 +165,6 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	if ((rc = sm6375_dme_set(PA_HSSERIES, PA_HS_MODE_A))) return rc;
 +	if ((rc = sm6375_dme_set(PA_PWRMODE, (1u << 4) | 1u))) return rc;
 +	return 0;
-+}
-+
-+/* Microsecond busy-wait on the arch counter (same as Enxerto's udelay). XNU's
-+ * delay() can block on the boot thread during vfs_mountroot (it calls
-+ * thread_block() when interrupts are enabled and preemption is 0); the counter
-+ * is always running once the timebase is up, so this never blocks. */
-+static void
-+sm6375_udelay(unsigned us)
-+{
-+	uint64_t f, t, end;
-+	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
-+	__asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(t));
-+	end = t + f / 1000000 * us;
-+	do {
-+		__asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(t));
-+	} while (t < end);
 +}
 +
 +/* RCG2: source select (bits 10:8) + hid_div (bits 4:0 = 2*div - 1), then update
