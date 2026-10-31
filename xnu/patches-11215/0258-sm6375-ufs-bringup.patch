@@ -23,7 +23,7 @@ diff --git a/bsd/dev/sweet_board.h b/bsd/dev/sweet_board.h
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -623,11 +623,404 @@
+@@ -623,11 +623,420 @@
  	return ENOENT;
  }
  
@@ -118,7 +118,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		if (mach_absolute_time() > deadline) {
 +			return ETIMEDOUT;
 +		}
-+		delay(1);
++		sm6375_udelay(1);
 +	}
 +	*res = ufs_rd(REG_UIC_ARG2) & 0xff;
 +	return 0;
@@ -151,6 +151,22 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	return 0;
 +}
 +
++/* Microsecond busy-wait on the arch counter (same as Enxerto's udelay). XNU's
++ * delay() can block on the boot thread during vfs_mountroot (it calls
++ * thread_block() when interrupts are enabled and preemption is 0); the counter
++ * is always running once the timebase is up, so this never blocks. */
++static void
++sm6375_udelay(unsigned us)
++{
++	uint64_t f, t, end;
++	__asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
++	__asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(t));
++	end = t + f / 1000000 * us;
++	do {
++		__asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(t));
++	} while (t < end);
++}
++
 +/* RCG2: source select (bits 10:8) + hid_div (bits 4:0 = 2*div - 1), then update
 + * + root enable. Poll CMD_UPDATE (bit 0) to clear; CMD_ROOT_EN (bit 1) stays set. */
 +static void
@@ -162,7 +178,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		if (!(gcc[cmd / 4] & 1u)) {		/* UPDATE clears when done */
 +			return;
 +		}
-+		delay(5);
++		sm6375_udelay(5);
 +	}
 +}
 +
@@ -184,7 +200,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		if (!(v & (1u << 31)) || (((v >> 28) & 0x7) == 2)) {
 +			return;
 +		}
-+		delay(5);
++		sm6375_udelay(5);
 +	}
 +}
 +
@@ -235,7 +251,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +			ufs_wr(REG_UTRLCLR, ~1u);
 +			return ETIMEDOUT;
 +		}
-+		delay(1);
++		sm6375_udelay(1);
 +	}
 +	__builtin_arm_dsb(0xf);
 +	ufs_wr(REG_IS, ufs_rd(REG_IS));
@@ -306,7 +322,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		}
 +	}
 +	/* Poll READ_FLAG until the device clears it, up to 30 s (Linux FDEVICEINIT
-+	 * timeout). XNU's delay() is in MICROseconds, so 100 ms = delay(100000). */
++	 * timeout). delay() is in MICROseconds, so 100 ms = sm6375_udelay(100000). */
 +	nanoseconds_to_absolutetime(30ull * NSEC_PER_SEC, &deadline);
 +	deadline += mach_absolute_time();
 +	for (;;) {
@@ -321,7 +337,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +			rc = ETIMEDOUT;
 +			break;
 +		}
-+		delay(100000);		/* 100 ms */
++		sm6375_udelay(100000);		/* 100 ms */
 +	}
 +	return rc;
 +}
@@ -339,19 +355,19 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +
 +	/* 1. HCE stop (ufshcd_hba_stop): the PHY then needs re-calibration. */
 +	ufs_wr(REG_HCE, 0);
-+	delay(1000);
++	sm6375_udelay(1000);
 +
 +	/* 2. PHY power domain (ufs_phy_gdsc): clear SW_COLLAPSE, wait PWR_ON. */
 +	gcc[SM6375_GCC_UFS_PHY_GDSCR / 4] &= ~1u;
 +	for (int i = 0; i < 2000 && !(gcc[SM6375_GCC_UFS_PHY_GDSCR / 4] & (1u << 31)); i++) {
-+		delay(5);
++		sm6375_udelay(5);
 +	}
 +
 +	/* 3. Core reset (ufs_qcom_host_reset). */
 +	gcc[SM6375_GCC_UFS_PHY_BCR / 4] |= 1u;
-+	delay(200);
++	sm6375_udelay(200);
 +	gcc[SM6375_GCC_UFS_PHY_BCR / 4] &= ~1u;
-+	delay(1000);
++	sm6375_udelay(1000);
 +
 +	/* 4. Vote GPLL0 (the parent PLL of the UFS RCGs) and bring up the clocks. */
 +	gcc[SM6375_GCC_GPLL0_VOTE / 4] |= 1u;
@@ -379,12 +395,12 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	phy[SM6375_PHY_SW_RESET / 4] = 0x00;
 +	ufs_wr(REG_UFS_CFG1, ufs_rd(REG_UFS_CFG1) & ~(1u << 1));
 +	ufs_rd(REG_UFS_CFG1);
-+	delay(1000);
++	sm6375_udelay(1000);
 +
 +	/* 6. Start the SERDES, wait for PCS_READY. */
 +	phy[SM6375_PHY_START / 4] = 0x01;
 +	for (int i = 0; i < 2000 && !(phy[SM6375_PHY_PCS_READY / 4] & 1); i++) {
-+		delay(500);
++		sm6375_udelay(500);
 +	}
 +	if (!(phy[SM6375_PHY_PCS_READY / 4] & 1)) {
 +		panic("sm6375 ufs: PHY PCS_READY never asserted (gdsc 0x%x)", gcc[SM6375_GCC_UFS_PHY_GDSCR / 4]);
@@ -393,13 +409,13 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	/* 7. HCE start + UICRDY (ufshcd_hba_start). */
 +	ufs_wr(REG_HCE, 1);
 +	for (int i = 0; i < 2000 && !(ufs_rd(REG_HCE) & 1); i++) {
-+		delay(50);
++		sm6375_udelay(50);
 +	}
 +	if (!(ufs_rd(REG_HCE) & 1)) {
 +		panic("sm6375 ufs: HCE did not assert");
 +	}
 +	for (int i = 0; i < 2000 && !(ufs_rd(REG_HCS) & HCS_UICRDY); i++) {
-+		delay(50);
++		sm6375_udelay(50);
 +	}
 +	if (!(ufs_rd(REG_HCS) & HCS_UICRDY)) {
 +		panic("sm6375 ufs: UICRDY never asserted (hcs 0x%x)", ufs_rd(REG_HCS));
@@ -429,7 +445,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  		printf("SWEET UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
  		return ENXIO;
  	}
-@@ -651,8 +1044,18 @@
+@@ -651,8 +1060,18 @@
  	/* Never ring a doorbell unless the host uses our list. */
  	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
  	    !(ufs_rd(REG_UTRLRSR) & 1)) {
@@ -442,7 +458,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	}
 +	/* UTRLRDY asserts only after the list base + run-stop are programmed. */
 +	for (int i = 0; i < 2000 && !(ufs_rd(REG_HCS) & HCS_UTRLRDY); i++) {
-+		delay(50);
++		sm6375_udelay(50);
 +	}
 +	if (!(ufs_rd(REG_HCS) & HCS_UTRLRDY)) {
 +		panic("SM6375 UFS: UTRLRDY never asserted (hcs 0x%x cap 0x%x rsr 0x%x)",
@@ -450,7 +466,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  	}
  	return 0;
  }
-@@ -1109,7 +1512,28 @@
+@@ -1109,7 +1528,28 @@
  	su.secsize = DEV_BSIZE;
  
  	lck_mtx_lock(&sweet_ufs_lock);
@@ -479,7 +495,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  	if (!error) {
  		static const uint8_t tur[6] = { 0x00 };
  		/* The first command after the bootloader may report a unit attention. */
-@@ -1117,9 +1541,27 @@
+@@ -1117,9 +1557,27 @@
  		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
  		}
  		printf("SWEET UFS: TUR %d\n", error);
