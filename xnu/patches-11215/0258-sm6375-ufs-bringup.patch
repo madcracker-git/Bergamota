@@ -23,7 +23,7 @@ diff --git a/bsd/dev/sweet_board.h b/bsd/dev/sweet_board.h
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -623,11 +623,266 @@
+@@ -623,11 +623,392 @@
  	return ENOENT;
  }
  
@@ -188,6 +188,132 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +	}
 +}
 +
++/*
++ * One device-management UPIU (NOP OUT or QUERY REQ) in slot 0. tc = transaction
++ * code; func = query function (0 for NOP); opcode/idn/value fill the query OSF.
++ * On success sets *upiu (response transaction code), *qresult (byte 6) and
++ * *qvalue (byte 23). No data transfer.
++ */
++static int
++sm6375_devmgmt(uint8_t tc, uint8_t func, uint8_t opcode, uint8_t idn, uint32_t value,
++    uint32_t *ocs_out, uint8_t *upiu_out, uint8_t *qresult_out, uint8_t *qvalue_out)
++{
++	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
++	struct ucd *ucd = (struct ucd *)(su.dma + DMA_UCD);
++	uint64_t ucd_pa = su.dma_pa + DMA_UCD;
++
++	bzero(utrd, sizeof(*utrd));
++	bzero(ucd, sizeof(*ucd));
++	ucd->cmd[0] = tc;
++	ucd->cmd[2] = su.lun;
++	ucd->cmd[3] = ++su.tag;
++	ucd->cmd[5] = func;
++	ucd->cmd[12] = opcode;
++	ucd->cmd[13] = idn;
++	ucd->cmd[20] = (uint8_t)(value >> 24);
++	ucd->cmd[21] = (uint8_t)(value >> 16);
++	ucd->cmd[22] = (uint8_t)(value >> 8);
++	ucd->cmd[23] = (uint8_t)value;
++
++	utrd->dw0 = (1u << 28) | (1u << 24);
++	utrd->dw2 = 0x0f;
++	utrd->ucdba = (uint32_t)ucd_pa;
++	utrd->ucdbau = (uint32_t)(ucd_pa >> 32);
++	utrd->resp = (512u / 4) << 16 | (512u / 4);
++	utrd->prdt = 0;
++
++	dma_sync(DMA_UTRL, sizeof(*utrd));
++	dma_sync(DMA_UCD, sizeof(*ucd));
++	__builtin_arm_dsb(0xf);
++
++	ufs_wr(REG_UTRLDBR, 1);
++	uint64_t deadline;
++	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &deadline);
++	deadline += mach_absolute_time();
++	while (ufs_rd(REG_UTRLDBR) & 1) {
++		if (mach_absolute_time() > deadline) {
++			ufs_wr(REG_UTRLCLR, ~1u);
++			return ETIMEDOUT;
++		}
++		delay(1);
++	}
++	__builtin_arm_dsb(0xf);
++	ufs_wr(REG_IS, ufs_rd(REG_IS));
++	dma_sync(DMA_UTRL, sizeof(*utrd));
++	dma_sync(DMA_UCD, sizeof(*ucd));
++
++	*ocs_out = utrd->dw2 & 0xff;
++	*upiu_out = ucd->resp[0];
++	*qresult_out = ucd->resp[6];
++	*qvalue_out = ucd->resp[23];
++	return 0;
++}
++
++/* NOP OUT (ufshcd_verify_dev_init): the device's UTP layer answers NOP IN. */
++static int
++sm6375_nop_out(void)
++{
++	uint32_t ocs; uint8_t upiu, qr, qv;
++	int rc = sm6375_devmgmt(0x00 /* NOP OUT */, 0, 0, 0, 0, &ocs, &upiu, &qr, &qv);
++	if (rc) {
++		return rc;
++	}
++	return (ocs == 0 && upiu == 0x20 /* NOP IN */) ? 0 : EIO;
++}
++
++/* Query request. func 0x01 = READ, 0x81 = WRITE; *val gets the value LSB. */
++static int
++sm6375_query(uint8_t func, uint8_t opcode, uint8_t idn, uint32_t value, uint8_t *val)
++{
++	uint32_t ocs; uint8_t upiu, qr, qv;
++	int rc = sm6375_devmgmt(0x16 /* QUERY REQ */, func, opcode, idn, value, &ocs, &upiu, &qr, &qv);
++	if (rc) {
++		return rc;
++	}
++	if (ocs || upiu != 0x36 /* QUERY RSP */ || qr != 0) {
++		return EIO;
++	}
++	if (val) {
++		*val = qv;
++	}
++	return 0;
++}
++
++/*
++ * Complete device init (ufshcd_complete_dev_init): SET fDeviceInit, then poll
++ * READ_FLAG until the device clears it. Requires the transfer list programmed
++ * (caller runs this after ufs_take_over_host).
++ */
++static int
++sm6375_fdevice_init(void)
++{
++	uint8_t fdi = 0;
++	int rc;
++
++	/* bRefClkFreq must be 0 (19.2 MHz) for the XO on this SoC. */
++	uint8_t rf = 0xff;
++	rc = sm6375_query(0x01 /* READ */, 0x03 /* READ_ATTR */, 0x0a /* bRefClkFreq */, 0, &rf);
++	if (rc == 0 && rf != 0) {
++		sm6375_query(0x81 /* WRITE */, 0x04 /* WRITE_ATTR */, 0x0a, 0, NULL);
++	}
++
++	rc = sm6375_query(0x01, 0x05 /* READ_FLAG */, 0x01 /* fDeviceInit */, 0, &fdi);
++	if (rc == 0 && fdi == 0) {
++		rc = sm6375_query(0x81, 0x06 /* SET_FLAG */, 0x01, 0, NULL);
++		if (rc) {
++			rc = 0;		/* already initialising is not fatal */
++		}
++	}
++	for (int i = 0; i < 300 && rc == 0; i++) {
++		rc = sm6375_query(0x01, 0x05, 0x01, 0, &fdi);
++		if (rc || !fdi) {
++			break;
++		}
++		delay(1000);		/* ~100 ms */
++	}
++	return rc;
++}
++
 +static int
 +sm6375_ufs_bringup(void)
 +{
@@ -291,7 +417,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  		printf("SWEET UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
  		return ENXIO;
  	}
-@@ -651,8 +906,18 @@
+@@ -651,8 +1032,18 @@
  	/* Never ring a doorbell unless the host uses our list. */
  	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
  	    !(ufs_rd(REG_UTRLRSR) & 1)) {
@@ -312,7 +438,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  	}
  	return 0;
  }
-@@ -1109,6 +1374,15 @@
+@@ -1109,7 +1500,28 @@
  	su.secsize = DEV_BSIZE;
  
  	lck_mtx_lock(&sweet_ufs_lock);
@@ -326,9 +452,22 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		}
 +	}
  	error = ufs_take_over_host();
++	if (!error && sweet_board_sm6375()) {
++		/* NOP OUT verify + fDeviceInit handshake (ufshcd_verify_dev_init +
++		 * ufshcd_complete_dev_init): the link re-train leaves the LUN in the
++		 * "initialising" state, and no SCSI command is accepted until it clears. */
++		error = sm6375_nop_out();
++		if (!error) {
++			error = sm6375_fdevice_init();
++		}
++		if (error) {
++			panic("SM6375 UFS: device init failed (%d)", error);
++		}
++	}
  	if (!error) {
  		static const uint8_t tur[6] = { 0x00 };
-@@ -1117,6 +1391,14 @@
+ 		/* The first command after the bootloader may report a unit attention. */
+@@ -1117,6 +1529,14 @@
  		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
  		}
  		printf("SWEET UFS: TUR %d\n", error);
