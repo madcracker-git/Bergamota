@@ -364,6 +364,17 @@ const char *loader_boot_payload(uintptr_t rd_start, uintptr_t rd_end, int verify
 	bootui_progress(1000, "STARTING IOS");
 	enxerto_charger_handoff();	/* the kernel's sweetcharger=2 finds the charger registers as ABL left them */
 #ifdef BOARD_SM6375
+	/* Always quiet the UFS host before jumping: the ABL leaves REG_IE (interrupt
+	 * enable) set and a stale completion pending, so the UFS SPI line is asserted.
+	 * When the kernel's GIC later enables that SPI during thread_daemon_init, the
+	 * storm hangs it. REG_IE=0 + ack REG_IS deasserts the line without touching
+	 * the running host state. MMU is still off here (Device memory, identity). */
+	{
+		volatile uint32_t *u = (volatile uint32_t *)UFS_BASE;
+		u[0x24 / 4] = 0;			/* REG_IE = 0 */
+		u[0x20 / 4] = u[0x20 / 4];		/* REG_IS: ack everything pending */
+		__asm__ volatile("dsb sy" ::: "memory");
+	}
 	/* DO NOT bring UFS up by default: the ABL leaves the host running (the
 	 * kernel's sweet_ufs.c takes it over directly), and re-initialising it here
 	 * hangs the kernel at thread_daemon_init. Opt-in via sweetufs=1 (diagnostic
