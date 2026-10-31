@@ -23,7 +23,7 @@ diff --git a/bsd/dev/sweet_board.h b/bsd/dev/sweet_board.h
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -623,11 +623,272 @@
+@@ -623,11 +623,266 @@
  	return ENOENT;
  }
  
@@ -279,12 +279,6 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 +		panic("sm6375 ufs: no device present after link startup (hcs 0x%x)", ufs_rd(REG_HCS));
 +	}
 +
-+	/* 9. Gear up to HS-G1 FAST. */
-+	rc = sm6375_ufs_gear_up();
-+	if (rc) {
-+		panic("sm6375 ufs: gear-up failed (%d)", rc);
-+	}
-+
 +	return 0;
 +}
 +
@@ -297,22 +291,28 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  		printf("SWEET UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
  		return ENXIO;
  	}
-@@ -652,6 +913,14 @@
+@@ -651,8 +906,18 @@
+ 	/* Never ring a doorbell unless the host uses our list. */
  	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
  	    !(ufs_rd(REG_UTRLRSR) & 1)) {
- 		printf("SWEET UFS: host did not take our request list\n");
-+		return EIO;
+-		printf("SWEET UFS: host did not take our request list\n");
+-		return EIO;
++		panic("SM6375 UFS: list readback failed: want 0x%llx:0x%x, got utrlba 0x%x utrlbau 0x%x rsr 0x%x cap 0x%x hcs 0x%x",
++		    list, (uint32_t)(list >> 32),
++		    ufs_rd(REG_UTRLBA), ufs_rd(REG_UTRLBAU), ufs_rd(REG_UTRLRSR),
++		    ufs_rd(REG_CAP), ufs_rd(REG_HCS));
 +	}
 +	/* UTRLRDY asserts only after the list base + run-stop are programmed. */
 +	for (int i = 0; i < 2000 && !(ufs_rd(REG_HCS) & HCS_UTRLRDY); i++) {
 +		delay(50);
 +	}
 +	if (!(ufs_rd(REG_HCS) & HCS_UTRLRDY)) {
-+		printf("SWEET UFS: UTRLRDY never asserted (hcs 0x%x)\n", ufs_rd(REG_HCS));
- 		return EIO;
++		panic("SM6375 UFS: UTRLRDY never asserted (hcs 0x%x cap 0x%x rsr 0x%x)",
++		    ufs_rd(REG_HCS), ufs_rd(REG_CAP), ufs_rd(REG_UTRLRSR));
  	}
  	return 0;
-@@ -1109,6 +1378,15 @@
+ }
+@@ -1109,6 +1374,15 @@
  	su.secsize = DEV_BSIZE;
  
  	lck_mtx_lock(&sweet_ufs_lock);
@@ -328,3 +328,18 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  	error = ufs_take_over_host();
  	if (!error) {
  		static const uint8_t tur[6] = { 0x00 };
+@@ -1117,6 +1391,14 @@
+ 		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
+ 		}
+ 		printf("SWEET UFS: TUR %d\n", error);
++	}
++	if (!error && sweet_board_sm6375()) {
++		/* Gear up to HS-G1 FAST AFTER device init (Linux ufshcd_config_pwr_mode).
++		 * Non-fatal: PWM-G1 is slow but functional. */
++		int grc = sm6375_ufs_gear_up();
++		if (grc) {
++			printf("SWEET UFS: gear-up failed (%d), staying at PWM-G1\n", grc);
++		}
+ 	}
+ 	if (!error) {
+ 		error = ufs_find_partition(want);
