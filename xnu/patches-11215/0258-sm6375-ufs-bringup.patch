@@ -450,7 +450,36 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  	}
  	return 0;
  }
-@@ -1109,7 +1512,28 @@
+@@ -1031,6 +1434,28 @@
+ 	unsigned int size = 0;
+ 	char want[64] = "userdata";
+ 	int error;
++
++#ifdef ARM64_BOARD_CONFIG_SWEET
++	/* Board-detection diagnostic (visible via panic): report what the DT says. */
++	{
++		DTEntry root;
++		void const *prop;
++		unsigned int psz = 0;
++		int sm = sweet_board_sm6375();
++		int be = sweet_board_beryllium();
++		if (SecureDTLookupEntry(NULL, "/", &root) == kSuccess &&
++		    SecureDTGetProperty(root, "compatible", &prop, &psz) == kSuccess) {
++			char c[96];
++			int n = psz > 90 ? 90 : (int)psz;
++			for (int i = 0; i < n; i++) {
++				c[i] = ((const char *)prop)[i] ? ((const char *)prop)[i] : '.';
++			}
++			c[n] = 0;
++			panic("SM6375 UFS: board sm=%d be=%d compat=[%s]", sm, be, c);
++		}
++		panic("SM6375 UFS: board sm=%d be=%d (no compat prop)", sm, be);
++	}
++#endif
+ 
+ 	if (SecureDTLookupEntry(NULL, "/sweet-ufs", &node) != kSuccess ||
+ 	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
+@@ -1109,7 +1534,28 @@
  	su.secsize = DEV_BSIZE;
  
  	lck_mtx_lock(&sweet_ufs_lock);
@@ -479,7 +508,7 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  	if (!error) {
  		static const uint8_t tur[6] = { 0x00 };
  		/* The first command after the bootloader may report a unit attention. */
-@@ -1117,9 +1541,27 @@
+@@ -1117,9 +1563,27 @@
  		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
  		}
  		printf("SWEET UFS: TUR %d\n", error);
